@@ -2,7 +2,7 @@
 
 This is an implementation of [pPEG] in C.
 
-A single file `pPEG.c`
+A single file `pPEG.c`, full features but still under development.
 
 ##  Example
 
@@ -11,7 +11,7 @@ A single file `pPEG.c`
 
     int main(void) {
         printf("Hello pPEG in C, URI example...\n");
-    
+
         // Equivalent to the regular expression for well-formed URI's in RFC 3986.
 
         char* uri_grammar =
@@ -28,7 +28,15 @@ A single file `pPEG.c`
             "http://www.ics.uci.edu/pub/ietf/uri/#Related");
 
         peg_print(&uri_tree); // parse tree example
-
+    }
+    /*
+        Hello pPEG in C, URI example...
+        URI
+        ├─scheme "http"
+        ├─auth "www.ics.uci.edu"
+        ├─path "/pub/ietf/uri/"
+        └─frag "Related"
+    */
 ```
 
 ##  API
