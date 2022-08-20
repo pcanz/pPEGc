@@ -1,7 +1,7 @@
 #include "test-kit.c"
 
 // experimental...
-// - should multi rule syntax use X::Y rather than X:Y
+// - should multi rule syntax use X::Y (or X|>Y X->Y) rather than X:Y
 // - or is this premature, stick to: <and X Y> (and <eq rule>)
 
 int main(void) {
@@ -12,7 +12,7 @@ int main(void) {
     "content = ~@tag*             \n"
     "tag     = '#'+               \n";
     
-    test_show(s, "###abcdef###");
+    test_show(s, "###abc##def###");
 
     char* p = 
     "P = '0' M:P '0' / '1' M:P '1' / [01]?   \n"
