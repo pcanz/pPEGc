@@ -9,6 +9,8 @@
 
 // -- peg grammar --------------------------------
 
+// TODO update grammar..... seq, rop, group, dq, ...
+
 char* peg_grammar = 
 "    Peg   = _ (rule _)+                          \n"
 "    rule  = id _ '=' _ alt                       \n"
@@ -70,15 +72,16 @@ enum op {
 
 typedef union {
     struct { // opx used for parser op code data...
-        unsigned char user;   // 255 = not used, else used by: ID, REP, ...
-        unsigned char idx;    // max 256 grammar rules
-        unsigned char min;    // repeat
-        unsigned char max;    // max 256 numeric repeat
-        unsigned char multi;  // B idx for A->B
-        char sign;            // ~ ! &   
+        char idx;       // max 256 grammar rules
+        char min;       // repeat
+        char max;       // max 256 numeric repeat
+        char sign;      // ~ ! &
+        char is_multi;  // bool flag multi useage
+        char multi;     // B idx for A::B (idx may be 0)
+        char c1,c2;     // reseve 8 bytes   
     } opx;
-    struct { // or pointer for application data
-        void* p;
+    struct { // or HEAP_DATA pointer for application data
+        void* ptr;
     } data;
 } Slot;
 
@@ -86,8 +89,11 @@ typedef union {
 
 typedef struct Node Node;
 
+enum DATA_USE { NO_DATA, DATA_VALS, HEAP_DATA };
+
 struct Node {
     char tag;      // rule name index
+    char data_use; // enum DATE_USE
     int start;     // start string slice
     int end;       // last+1 string slice
     int count;     // nodes count
@@ -99,10 +105,10 @@ static Node *newNode(int tag, int i, int j, int n) {
     Node *nd = (Node *)malloc(sizeof(Node) + n*sizeof(Node *));
     if (nd == NULL) abort(); // TODO or exit()? or...?
     nd->tag = tag;
+    nd->data_use = NO_DATA;
     nd->start = i;
     nd->end = j;
     nd->count = n; // number of children nodes
-    nd->data.opx.user = 255; // 0 is a valid user
     return nd;
 };
 
@@ -154,7 +160,7 @@ typedef struct {
     int stack;      // index into parse result Nodes
     Node* results[MAX_STACK]; // TODO elastic?
 
-    int multi; // multi-rule % node count
+    int multi; // multi-rule node count
 
     int flags; // debug, trace
     int trace_pos;
@@ -208,34 +214,6 @@ int utf8(char* p) {
     return x;
 }
 
-int key(char* p) {
-    int key = 0;
-    for (int i=0; i<4; i++) {
-        unsigned char c = p[i];
-        if (c == '\0') return key;
-        key = (key<<8)+c;
-    }
-    return key;
-}
-
-// int name_tag(Env* pen, char* name, int len) {
-//     for (int i=0; i<pen->tree->count; i++) {
-//         Node* id = pen->tree->nodes[i]->nodes[0];
-//         int n = id->end-id->start;
-//         if (n != len) continue;
-//         bool match = true;
-//         for (int j=0; j<len; j++) {
-//             if (pen->grammar[id->start+j] != name[j]) {
-//                 match = false;
-//                 break;
-//             }
-//         }
-//         if (!match) continue;
-//         return i;
-//     }
-//     return -1;
-// } 
-
 void print_tag_name(Env* pen, int tag) {
     if (!pen->tree) { // boot grammar...
         printf("%s", peg_names[tag]);
@@ -253,7 +231,7 @@ bool run(Env *pen, Node *exp) {
     if (pen->flags == 1) debug_trace(pen, exp);
     switch (exp->tag) {
     case ID: {
-        if (exp->data.opx.user != ID) resolve_id(pen, exp);
+        if (exp->data_use == NO_DATA) resolve_id(pen, exp);
         int tag = exp->data.opx.idx;
         int start = pen->pos;
         int stack = pen->stack;
@@ -320,7 +298,7 @@ bool run(Env *pen, Node *exp) {
         return false;
     }
     case REP: {
-        if (exp->data.opx.user != REP) resolve_rep(pen, exp);
+        if (exp->data_use == NO_DATA) resolve_rep(pen, exp);
         Node *op = exp->nodes[0];
         int min = exp->data.opx.min;
         int max = exp->data.opx.max;
@@ -348,7 +326,7 @@ bool run(Env *pen, Node *exp) {
         return true;
     }
     case PRE: {
-        if (exp->data.opx.user != PRE) resolve_pre(pen, exp);
+        if (exp->data_use == NO_DATA) resolve_pre(pen, exp);
         Node *op = exp->nodes[1];
         char sign = exp->data.opx.sign;
         int pos = pen->pos;
@@ -375,6 +353,7 @@ bool run(Env *pen, Node *exp) {
     }
     case SQ: { 
         if (pen->pos+exp->end-exp->start > pen->end) return false;
+        // TODO if raw && !resolved raw -> escaped string....
         if (pen->grammar[exp->end+1] == 'i') { // 'xyz'i ASCII only..
             for (int i=exp->start; i<exp->end; i+=1) {
                 unsigned char c1 = pen->input[pen->pos];
@@ -393,25 +372,26 @@ bool run(Env *pen, Node *exp) {
         return true;
     }
     case CHS: {
+        // TODO if raw && !resolved ....
         if (pen->pos >= pen->end) return false;
         int c = pen->input[pen->pos];
         if (c > 127 || c < 0) c = utf8(pen->input);
         int x_size = 1;
         for (int i=exp->start; i<exp->end; i+=x_size) {
-            int x = pen->grammar[i];
+            int x = pen->grammar[i]; // TODO raw new escaped string
             x_size = 1;
             if (x > 127 || x < 0) {
-                x = utf8(pen->grammar+i);
+                x = utf8(pen->grammar+i); // TODO
                 x_size = utf8_size(x);
             }
             if (i+x_size+1 < exp->end && pen->grammar[i+x_size] == '-') {
-                int y = pen->grammar[i+x_size+1];
+                int y = pen->grammar[i+x_size+1]; // TODO
                 int y_size = 1;
                 if (y > 127 || y < 0) {
-                    y = utf8(pen->grammar+i);
+                    y = utf8(pen->grammar+i); // TODO
                     y_size =utf8_size(y);
                 }
-                i += x_size+1; // skip range: "x-y"
+                i += 1+y_size; // skip range: "x-y"
                 if (c < x) continue;
                 if (c > y) continue;
                 pen->pos += x_size;
@@ -432,7 +412,7 @@ bool run(Env *pen, Node *exp) {
         }
         if (exp->nodes[0]->tag == AT) { // at id
             Node* id = exp->nodes[1];
-            if (id->data.opx.user != ID) resolve_id(pen, id);
+            if (id->data_use == NO_DATA) resolve_id(pen, id);
             int tag = id->data.opx.idx;
             int k = pen->stack;
             while (k-- > 0) {
@@ -457,14 +437,15 @@ bool run(Env *pen, Node *exp) {
             // int start = pen->pos;
             int stack = pen->stack;
             Node* id1 = exp->nodes[0];
-            if (id1->data.opx.user != ID) resolve_id(pen, id1);
+            if (id1->data_use == NO_DATA) resolve_id(pen, id1);
             Node* id2 = exp->nodes[1];
-            if (id2->data.opx.user != ID) resolve_id(pen, id2);
+            if (id2->data_use == NO_DATA) resolve_id(pen, id2);
             bool result = run(pen, id1);
             if (result && pen->stack > stack) {
                 pen->multi++;
                 Node* node = pen->results[stack];
-                node->data.opx.user = MULTI;
+                node->data_use = DATA_VALS;
+                node->data.opx.is_multi = 1;
                 node->data.opx.multi = id2->data.opx.idx;
             }
             return result;
@@ -568,7 +549,7 @@ void resolve_id(Env* pen, Node* exp) {
         }
         if (!match) continue;
         exp->data.opx.idx = i;
-        exp->data.opx.user = ID;
+        exp->data_use = DATA_VALS;
         return;
     }
     printf("*** Undefined rule: %s\n", name);
@@ -606,15 +587,34 @@ void resolve_rep(Env* pen, Node* exp) {
     } else abort();
     exp->data.opx.min = min;
     exp->data.opx.max = max;
-    exp->data.opx.user = REP;
+    exp->data_use = DATA_VALS;
 }
 
 void resolve_pre(Env* pen, Node* exp) {
     Node* pfx = exp->nodes[0];
     char sign = pen->grammar[pfx->start];
     exp->data.opx.sign = sign;
-    exp->data.opx.user = PRE;
+    exp->data_use = DATA_VALS;
 }
+
+// char* escape(char* str, int start, int end, char* out) {
+//     for (int i=start; i<end; i+=1) {
+//         char c = str[i];
+//         if (c == '\\') {
+//             char x = str[++i];
+//             if (x == 'u') {
+//                 code = utf8_endcode(str, out);
+//                 i += ut8_size(code)-1;
+//                 continue;
+//             }
+//             if (x == 'n') c = '\n';
+//             if (x == 'r') c = '\r';
+//             if (x == 't') c = '\t';
+//         }
+//         *out++ = c;
+//     }
+//     return out;
+// }
 
 // -- debug trace op codes display ---------------------------------
 
@@ -781,7 +781,7 @@ Node *op(int tag, char *str) { // tag: ID, SQ, or CHS
     nd->end = i + strlen(str);
     if (tag == ID) {
         nd->data.opx.idx = rule_index(str);
-        nd->data.opx.user = ID;
+        nd->data_use = DATA_VALS;
     }
     return nd;
 }
@@ -798,7 +798,7 @@ Node *opREP(Node *opx, char* sfx) { // rep(op, sfx)
     if (sfx[0] == '?') max = 1;
     nd->data.opx.min = min;
     nd->data.opx.max = max;
-    nd->data.opx.user = REP;
+    nd->data_use = DATA_VALS;
     return nd;
 }
 
@@ -810,7 +810,7 @@ Node *opPRE(char* pfx, Node* opx) {
     nd->nodes[0] = op(PFX, pfx);
     nd->nodes[1] = opx;
     nd->data.opx.sign = pfx[0];
-    nd->data.opx.user = PRE;
+    nd->data_use = DATA_VALS;
     return nd;
 }
 
@@ -995,7 +995,7 @@ void fault_report(Peg* ast) {
 void multi_transform(Env* pen, Node* parent) {
     for (int i=0; i<parent->count; i++) {
         Node* node = parent->nodes[i]; 
-        if (node->data.opx.user == MULTI) { // flags opx for multi
+        if (node->data_use == DATA_VALS && node->data.opx.is_multi) {
             int tag = node->data.opx.multi;
             pen->multi--;
             pen->pos = node->start;
@@ -1032,8 +1032,8 @@ void bootstrap() {
 
 void peg_print(Peg* peg);
 
-Peg peg_parser(Peg* peg, char* input, int flags) {
-    if (!peg) { // peg_compile(BOOT, ...)
+Peg peg_parser(Peg* peg, char* input, int start, int end, int flags) {
+    if (!peg) { // peg_compile(BOOT, ...)    TODO flags mask for raw+trace...
         if (!BOOT) bootstrap();
         peg = BOOT;
     }
@@ -1041,8 +1041,8 @@ Peg peg_parser(Peg* peg, char* input, int flags) {
     pen.grammar = peg->src;
     pen.tree = peg->tree;
     pen.input = input;
-    pen.pos = 0;
-    pen.end = strlen(input);
+    pen.pos = start;
+    pen.end = end; //strlen(input);
     pen.depth = 0;
     pen.stack = 0;
     pen.multi = 0;
@@ -1054,9 +1054,9 @@ Peg peg_parser(Peg* peg, char* input, int flags) {
     pen.fail_rule = 0;
     pen.expected = NULL;
 
-    Node* start = pen.tree->nodes[0]->nodes[0]; // op(ID, <rule.0>)
+    Node* begin = pen.tree->nodes[0]->nodes[0]; // op(ID, <rule.0>)
 
-    bool result = run(&pen, start);
+    bool result = run(&pen, begin);
 
     if (pen.flags) printf("\n"); // end of debug trace
 
@@ -1083,11 +1083,23 @@ Peg peg_parser(Peg* peg, char* input, int flags) {
 // ==  API  ============================================
 
 Peg peg_compile(char* grammar) {
-    return peg_parser(BOOT, grammar, 0);
+    return peg_parser(BOOT, grammar, 0, strlen(grammar), 0);
+}
+
+Peg peg_compile_text(char* grammar, int start, int end) {
+    return peg_parser(BOOT, grammar, start, end, 0);
+}
+
+Peg peg_compile_raw(char* grammar, int start, int end) {
+    return peg_parser(BOOT, grammar, start, end, 0);
 }
 
 Peg peg_parse(Peg* peg, char* input) {
-    return peg_parser(peg, input, 0);
+    return peg_parser(peg, input, 0, strlen(input), 0);
+}
+
+Peg peg_parse_text(Peg* peg, char* input, int start, int end) {
+    return peg_parser(peg, input, start, end, 0);
 }
 
 void peg_print(Peg* peg) {
@@ -1100,9 +1112,9 @@ bool peg_err(Peg* peg) {
 }
 
 Peg peg_trace(Peg* peg, char* input) {
-    return peg_parser(peg, input, 2);
+    return peg_parser(peg, input, 0, strlen(input), 2);
 }
 
 Peg peg_debug(Peg* peg, char* input) {
-    return peg_parser(peg, input, 1);
+    return peg_parser(peg, input, 0, strlen(input), 1);
 }
