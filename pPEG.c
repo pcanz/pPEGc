@@ -81,8 +81,8 @@ typedef union {
         char c1,c2;     // reseve 8 bytes   
     } opx;
     struct { // or HEAP_DATA pointer for application data
-        void* ptr;
-    } data;
+        void* p;
+    } ptr;
 } Slot;
 
 // -- parse tree node ------------------------------
@@ -111,6 +111,16 @@ static Node *newNode(int tag, int i, int j, int n) {
     nd->count = n; // number of children nodes
     return nd;
 };
+
+static void drop(Node* node) {
+    if (node->data_use == HEAP_DATA) {
+        free(node->data.ptr.p);
+    }
+    for (int i=0; i<node->count; i+=1) {
+        drop(node->nodes[i]);
+    }
+    free(node);
+}
 
 enum err { PEG_OK, PEG_FELL_SHORT, PEG_FAILED };
 
@@ -290,7 +300,7 @@ bool run(Env *pen, Node *exp) {
             }
             if (pen->stack > stack) {
                 for (int i=stack; i<stack; i++) {
-                    free(pen->results[i]);
+                    drop(pen->results[i]);
                 }
                 pen->stack = stack;
             }
@@ -319,7 +329,7 @@ bool run(Env *pen, Node *exp) {
         }
         if (pen->stack > stack) {
             for (int i=stack; i<stack; i++) {
-                free(pen->results[i]);
+                drop(pen->results[i]);
             }
             pen->stack = stack;
         }
@@ -344,7 +354,7 @@ bool run(Env *pen, Node *exp) {
         pen->pos = pos; // reset
         if (pen->stack > stack) {
             for (int i=stack; i<stack; i++) {
-                free(pen->results[i]);
+                drop(pen->results[i]);
             }
             pen->stack = stack;
         }
@@ -1004,7 +1014,7 @@ void multi_transform(Env* pen, Node* parent) {
             int stack = pen->stack;
             bool result = run(pen, rule);
             if (result && pen->pos == node->end) {
-                free(parent->nodes[i]);
+                drop(parent->nodes[i]);
                 parent->nodes[i] = pen->results[stack--];
             }
         } else {
