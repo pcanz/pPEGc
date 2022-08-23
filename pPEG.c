@@ -39,6 +39,22 @@ char* peg_grammar =
 "    extn  = '<' ~'>'* '>'                        \n"
 "    _     = ([ \n\r\t]+ / '#' ~[\n\r]*)*         \n";
 
+//   _    = (_WS+ / '#' ~_EOL*)*
+//   _WS  = _9..D / _20
+//   _EOL = _A / _D
+
+//   _  = (_20 / _9-D / '#' ~(_A/_D)*)*
+
+//  _WS = [ \t\n\r]  _EOL = [\n\r] 
+//  _SP = [ \t] _ANY = ~[] _EOF = !~[]
+//  _1234 = \u1234 e.g.  _20 = ' '
+//  _123..456 = _123/_124/_125/.../_456
+
+//  _WS  = _9..D/_20
+//  _EOL = _A/_D
+
+//  _ANY = ~[]  = _0-10FFFF
+
 char *peg_names[] = { // used for the bootstrap rule_index
     "Peg", "rule",
     "alt", "seq", "rep", "pre", "term", "group",
@@ -98,12 +114,25 @@ struct Node {
     int end;       // last+1 string slice
     int count;     // nodes count
     Slot data;     // application data -- op codes
-    Node* nodes[]; // chidren node pointers
+    Node* nodes[]; // children node pointers
 };
+
+enum PEG_ERR { PEG_OK, PEG_PANIC, PEG_FELL_SHORT, PEG_FAILED };
+
+char* peg_err_msg[] = {
+    "ok", "PANIC",
+    "Parse fell short",
+    "Parse failed"
+};
+
+void panic(char* msg) { // not static, convenient for apps to use this
+    printf("*** panic: %s\n", msg);
+    exit(PEG_PANIC);
+}
 
 static Node *newNode(int tag, int i, int j, int n) {
     Node *nd = (Node *)malloc(sizeof(Node) + n*sizeof(Node *));
-    if (nd == NULL) abort(); // TODO or exit()? or...?
+    if (nd == NULL) panic("malloc");
     nd->tag = tag;
     nd->data_use = NO_DATA;
     nd->start = i;
@@ -122,18 +151,10 @@ static void drop(Node* node) {
     free(node);
 }
 
-enum err { PEG_OK, PEG_FELL_SHORT, PEG_FAILED };
-
-char* peg_err_msg[] = {
-    "ok",
-    "Parse fell short",
-    "Parse failed"
-};
-
 typedef struct Err Err;
 
 struct Err {
-    int err; 
+    int err; // PEG_ERR
     int fail_rule;
     int pos;
     Node* expected;
@@ -141,7 +162,7 @@ struct Err {
 
 Err* newErr(int code, int pos) {
     Err* err = malloc(sizeof(Err));
-    if (!err) abort(); // TODO what should this do, exit()?
+    if (!err) panic("malloc failed in newErr...");
     err->err = code;
     err->pos = pos;
     return err;
@@ -202,7 +223,7 @@ void print_text(char* str, Node* node);
 int utf8_size(int x) {
     if (x < 128) return 1;
     if (x < 0x800) return 2;
-    if (x < 0x10000) return 3;
+    if (x < 0x8000) return 3;
     return 4;
 }
 
@@ -214,7 +235,7 @@ int utf8_len(char* p) {
     return i;
 }
 
-int utf8(char* p) {
+int utf8_read(char* p) {
     unsigned int c = (unsigned char)p[0];
     if (c < 127) return c;            
     int x = c<<1, i = 2;
@@ -222,6 +243,30 @@ int utf8(char* p) {
     x = (x & 0xFF) >> i;
     for (int n=1; n<i; n++) x = (x<<6)+((unsigned char)p[n] & 0x3F);
     return x;
+}
+
+int utf8_write(char* p, int x) {
+    if (x < 128) {
+        *p = x;
+        return 1;
+    }            
+    if (x < 0x800) { // 110x xxxx 10xx xxxx
+        *p = 0xC0 + (x >> 6);
+        *(p+1) = 0x80 + (x & 0x3F);
+        return 2;
+    }
+    if (x < 0x8000) { // 1110 xxxx 10xx xxxx 10xx xxxx
+        *p = 0xE0 + (x >> 12);
+        *(p+1) = 0x80 + ((x >> 6) & 0x3F);
+        *(p+2) = 0x80 + (x & 0x3F);       
+        return 3;
+    }
+    // 10000-10FFFF    1111 0xxx 10xx xxxx 10xx xxxx 10xx xxxx
+    *p = 0xF0 + (x >> 18);
+    *(p+1) = 0x80 + ((x >> 12) & 0x3F);
+    *(p+2) = 0x80 + ((x >> 6) & 0x3F);
+    *(p+3) = 0x80 + (x & 0x3F);       
+    return 4;
 }
 
 void print_tag_name(Env* pen, int tag) {
@@ -247,10 +292,8 @@ bool run(Env *pen, Node *exp) {
         int stack = pen->stack;
         Node* rule = pen->tree->nodes[tag]->nodes[1];
         if (pen->flags == 2) rule_trace_open(pen, tag);
-        if (pen->depth++ > MAX_STACK) {
-            printf(".... call reciursion > MAX_STACK ....");
-            abort(); // TODO exit? better error msg...
-        }
+        if (pen->depth++ > MAX_STACK)
+            panic("call reciursion > MAX_STACK ....");
         bool result = run(pen, rule);
         pen->depth--;
         if (pen->flags == 2) rule_trace_close(pen, tag, result);
@@ -266,9 +309,8 @@ bool run(Env *pen, Node *exp) {
             };
             pen->results[stack] = nd;
             pen->stack = stack+1;
-            if (pen->stack >= MAX_STACK) {
-                printf("MAX_STACK %d exceeded...\n", MAX_STACK);
-                abort(); // TODO exit? elastic results stack?
+            if (pen->stack >= MAX_STACK) { // TODO elastic stack...
+                panic("MAX_STACK exceeded...");
             }
         }
         return result;
@@ -384,22 +426,22 @@ bool run(Env *pen, Node *exp) {
     case CHS: {
         // TODO if raw && !resolved ....
         if (pen->pos >= pen->end) return false;
-        int c = pen->input[pen->pos];
-        if (c > 127 || c < 0) c = utf8(pen->input);
+        int c = (unsigned char)pen->input[pen->pos];
+        if (c > 127) c = utf8_read(pen->input);
         int x_size = 1;
         for (int i=exp->start; i<exp->end; i+=x_size) {
-            int x = pen->grammar[i]; // TODO raw new escaped string
+            int x = (unsigned char)pen->grammar[i]; // TODO raw new escaped string
             x_size = 1;
-            if (x > 127 || x < 0) {
-                x = utf8(pen->grammar+i); // TODO
+            if (x > 127) {
+                x = utf8_read(pen->grammar+i); // TODO
                 x_size = utf8_size(x);
             }
             if (i+x_size+1 < exp->end && pen->grammar[i+x_size] == '-') {
-                int y = pen->grammar[i+x_size+1]; // TODO
+                int y = (unsigned char)pen->grammar[i+x_size+1]; // TODO
                 int y_size = 1;
-                if (y > 127 || y < 0) {
-                    y = utf8(pen->grammar+i); // TODO
-                    y_size =utf8_size(y);
+                if (y > 127) {
+                    y = utf8_read(pen->grammar+i); // TODO
+                    y_size = utf8_size(y);
                 }
                 i += 1+y_size; // skip range: "x-y"
                 if (c < x) continue;
@@ -483,10 +525,13 @@ bool run(Env *pen, Node *exp) {
         }
         return false;
     }
-    default:
-        printf("woops: undefined op: %d\n", exp->tag);
-        abort();
-    }
+    default: {
+        char msg[50];
+        sprintf(msg, "woops: undefined op: %d\n", exp->tag);
+        panic(msg);
+        return false;
+      }
+    } // switch
 } // run
 
 // -- node utils ---------------------------------
@@ -562,19 +607,20 @@ void resolve_id(Env* pen, Node* exp) {
         exp->data_use = DATA_VALS;
         return;
     }
-    printf("*** Undefined rule: %s\n", name);
-    abort();
-    return;
+    char msg[50];
+    sprintf(msg, "*** Undefined rule: %s\n", name); // TODO improve this..
+    panic(msg);
 }
 
-unsigned char numeric(char* src, int start, int end) {
+unsigned char rep_num(char* src, int start, int end) {
     int num = 0;        
     for (int i = start; i < end; i++) {
         num = num*10 + src[i]-'0';
     }
     if (num > 255) {
-        printf("Repeat * %d is too big, limit 255\n", num);
-        abort();
+        char msg[50];
+        sprintf(msg, "Repeat * %d is too big, limit 255\n", num);
+        panic(msg);
     }
     return (unsigned char)num;
 }
@@ -587,14 +633,14 @@ void resolve_rep(Env* pen, Node* exp) {
         if (sign == '+') min = 1;
         if (sign == '?') max = 1;
     } else if (sfx->tag == NUM) {
-        min = numeric(pen->grammar, sfx->start, sfx->end);
+        min = rep_num(pen->grammar, sfx->start, sfx->end);
         max = min;
     } else if (sfx->tag == RANGE) {
         Node* num1 = sfx->nodes[0];
-        min = numeric(pen->grammar, num1->start, num1->end);
+        min = rep_num(pen->grammar, num1->start, num1->end);
         Node* num2 = sfx->nodes[1];
-        max = numeric(pen->grammar, num2->start, num2->end);
-    } else abort();
+        max = rep_num(pen->grammar, num2->start, num2->end);
+    } else panic("woops..");
     exp->data.opx.min = min;
     exp->data.opx.max = max;
     exp->data_use = DATA_VALS;
@@ -607,24 +653,54 @@ void resolve_pre(Env* pen, Node* exp) {
     exp->data_use = DATA_VALS;
 }
 
-// char* escape(char* str, int start, int end, char* out) {
-//     for (int i=start; i<end; i+=1) {
-//         char c = str[i];
-//         if (c == '\\') {
-//             char x = str[++i];
-//             if (x == 'u') {
-//                 code = utf8_endcode(str, out);
-//                 i += ut8_size(code)-1;
-//                 continue;
-//             }
-//             if (x == 'n') c = '\n';
-//             if (x == 'r') c = '\r';
-//             if (x == 't') c = '\t';
-//         }
-//         *out++ = c;
-//     }
-//     return out;
-// }
+int hex4(char* src) {
+    int num = 0;        
+    for (int i = 0; i < 4; i++) {
+        char c = src[i];
+        if (c>='0' & c<='9')
+            num = num*16 + c-'0';
+        else if (c>='a' & c<='z')
+            num = num*16 + c-'a'+10;
+        else if (c>='A' & c<='Z')
+            num = num*16 + c-'A'+10;
+        else panic("escape \\u0000, expecting 4 hex digits...");
+    }
+    return num;
+}
+
+int escape(char* str, int start, int end, char* out) {
+    char* out0 = out;
+    for (int i=start; i<end; i+=1) {
+        char c = str[i];
+        if (c == '\\') {
+            char x = str[++i]; // i advanced, skip over backslash
+            if (x == 'u') {
+                int code = hex4(str+i+1);
+                int size = utf8_write(out, code);
+                printf("code=%x size=%d\n", code, size);
+                out += size;
+                i += 4; // i -> u
+                continue;
+            }
+            if (x == 'n') c = '\n';
+            if (x == 'r') c = '\r';
+            if (x == 't') c = '\t';
+        }
+        *out++ = c;
+    }
+    return (int)(out-out0);
+}
+
+void resolve_chs(Env* pen, Node* exp) {
+    char buf[127]; // limits 'abc' and [abc] to a long line..
+    if (127 < exp->end - exp->start) 
+        panic("quote or chars too long, 127 char limit...");
+    int len = escape(pen->input, exp->start, exp->end, buf);
+    printf("len=%d\n",len);
+
+    // TODO malloc heap data for node.....
+
+}
 
 // -- debug trace op codes display ---------------------------------
 
@@ -639,7 +715,7 @@ void show_exp(Env *pen, Node *exp, char* out, int len) {
     int tag = exp->tag;
     char *name = peg_names[tag];
     int n = strlen(name);
-    if (n+2 < len) abort();
+    if (n+2 > len) panic("show_exp overflow...");
     strcpy(out, name);
     out += n; // strlen(name);
     *out++ = ' ';
@@ -768,8 +844,10 @@ int findstr(char *str) { // index of str span peg_grammar
     char* src = peg_grammar;
     char* p = strstr(src, str);
     if (p) return p - src;
-    printf("Boot: '%s' not found in peg grammar...\n", str);
-    abort();
+    char msg[100];
+    sprintf(msg, "Boot: '%s' not found in peg grammar...\n", str);
+    panic(msg);
+    return 0;
 }
 
 int rule_index(const char *name) { // index of name in peg_names
@@ -777,8 +855,10 @@ int rule_index(const char *name) { // index of name in peg_names
     for (int i=0; i<n; i+=1) {
         if (strcmp(peg_names[i], name) == 0) return i;
     }
-    printf("Boot: '%s' is not a peg grammar rule name... \n", name);
-    abort();
+    char msg[100];
+    sprintf(msg, "Boot: '%s' is not a peg grammar rule name... \n", name);
+    panic(msg);
+    return 0;
 }
 
 Node *op(int tag, char *str) { // tag: ID, SQ, or CHS
@@ -1030,7 +1110,7 @@ Peg* BOOT = NULL;
 // BOOT = { peg_grammar, boot_code(), NULL};
 void bootstrap() {
     Peg* peg = (Peg *)malloc(sizeof(Peg));
-    if (!peg) abort();
+    if (!peg) panic("boot malloc..");
     peg->src = peg_grammar;
     peg->tree = boot_code();
     peg->peg = NULL;
