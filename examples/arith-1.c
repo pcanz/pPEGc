@@ -12,18 +12,22 @@ int main(void) {
     "mult  = int ('*' int)*     \n"
     "int   = [0-9]+             \n";
 
-    Peg arith_peg = peg_compile(arith_grammar);
+    Peg* arith_peg = peg_compile(arith_grammar);
 
-    Peg arith = peg_parse(&arith_peg, "4+5*6+8");
+    char test[] = "4+5*6+8";
 
-    peg_print(&arith); // parse tree
+    printf("expr = %s \n", test);
 
-    int result = evaluate(&arith, arith.tree);
+    Peg* arith = peg_parse(arith_peg, test);
+
+    peg_print(arith); // parse tree
+
+    int result = evaluate(arith, arith->tree);
 
     printf("answer = %d \n", result);
 }
 
-// evluate parse tree.................................................
+// evaluate parse tree.................................................
 
 enum ARITH {ADD, MULT, INT}; // Must match peg_arith grammar rules
 

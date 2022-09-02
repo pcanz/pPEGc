@@ -15,7 +15,7 @@ int main(void) {
     test_show(s, "###abc##def###");
 
     char* p = 
-    "P = '0' M:P '0' / '1' M:P '1' / [01]?   \n"
+    "P = '0' M::P '0' / '1' M::P '1' / [01]?   \n"
     "M = ([01] &[01])+                       \n";
     
     test_ok(p, "010");
@@ -26,7 +26,7 @@ int main(void) {
     test_ok(p, "1100010011");
 
     char* pn = 
-    "P = x M:P @x / x?    \n"
+    "P = x M::P @x / x?    \n"
     "M = (x &x)+          \n"
     "x = [a-z]            \n";
 

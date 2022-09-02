@@ -5,7 +5,9 @@
 #include <string.h>
 #include <stdarg.h>
 
-#define MAX_STACK 255
+#include "pPEG.h"
+
+#define MAX_STACK 512
 
 // -- peg grammar --------------------------------
 
@@ -16,16 +18,16 @@ char* peg_grammar =
 "    rule  = id _ '=' _ alt                       \n"
 "                                                 \n"
 "    alt   = seq ('/' _ seq)*                     \n"
-"    seq   = rep _ (rep _)*                       \n"
-"    rep   = pre sfx?                             \n"
+"    seq   = rep*                                 \n"
+"    rep   = pre sfx? _                           \n"
 "    pre   = pfx? term                            \n"
 "    term  = call / quote / chars / group / extn  \n"
 "    group = '(' _ alt _ ')'                      \n"
 "                                                 \n"
 "    call  = at? id multi? _ !'='                 \n"
 "    at    = '@'                                  \n"
-"    multi = ':' id                               \n"
-"    id    = [a-zA-Z_] [a-zA-Z0-9_]*              \n"
+"    multi = '::' id                              \n"
+"    id    = [a-zA-Z_] [a-zA-Z0-9_-]*             \n"
 "                                                 \n"
 "    pfx   = [~!&]                                \n"
 "    sfx   = [+?] / '*' range?                    \n"
@@ -37,23 +39,8 @@ char* peg_grammar =
 "    chars = '[' chs ']'                          \n"
 "    chs   =  ~']'*                               \n"
 "    extn  = '<' ~'>'* '>'                        \n"
-"    _     = ([ \n\r\t]+ / '#' ~[\n\r]*)*         \n";
+"    _     = (_WS+ / '#' ~_EOL*)*                 \n";
 
-//   _    = (_WS+ / '#' ~_EOL*)*
-//   _WS  = _9..D / _20
-//   _EOL = _A / _D
-
-//   _  = (_20 / _9-D / '#' ~(_A/_D)*)*
-
-//  _WS = [ \t\n\r]  _EOL = [\n\r] 
-//  _SP = [ \t] _ANY = ~[] _EOF = !~[]
-//  _1234 = \u1234 e.g.  _20 = ' '
-//  _123..456 = _123/_124/_125/.../_456
-
-//  _WS  = _9..D/_20
-//  _EOL = _A/_D
-
-//  _ANY = ~[]  = _0-10FFFF
 
 char *peg_names[] = { // used for the bootstrap rule_index
     "Peg", "rule",
@@ -67,9 +54,9 @@ char *peg_names[] = { // used for the bootstrap rule_index
 
 // The op codes are matched one-one with peg_grammar rules so that the
 // bootstrap op codes have the same values as the rule name index for the
-// corresponding peg rule names. i.e AST tags == op-codes.
+// corresponding peg rule names. i.e peg tags == op-codes.
 
-// BOOT calls boot_code() which must agree with these op codes. 
+// BOOT = boot_code();  which must agree with these op codes. 
 
 enum op {
     PEG, RULE,
@@ -79,39 +66,59 @@ enum op {
     QUOTE, SQ, CHARS, CHS, EXTN, WS
 };
 
-// parser machine instruction op-codes:
+// Parser machine instruction op-codes:
 // ALT, SEQ, REP, PRE, ID, SQ, CHS
-// plus from resolving CALL ...
-// AT, MULTI
+// CALL, AT, MULTI
 
-// -- parse tree node: slot for application data ------
+// -- implicit rule names ---------------------------------------------------
 
-typedef union {
-    struct { // opx used for parser op code data...
-        char idx;       // max 256 grammar rules
-        char min;       // repeat
+static char* implicit_names[] = { // _NULL = 0 is not an implicit rule name
+    "_NULL", "_CHAR",             // _CHAR = 1 is an implicit char code
+    "_TAB", "_CR", "_LF",         // other implicit rules...
+    "_BS", "_DQ", "_SQ", "_BT",
+    "_EOL", "_ANY",
+    "_EOF", "_WS", "_NL", "_"          
+};
+
+enum IMPLICIT {     // NOTE: these must match with implicit_names[]
+    _NULL, _CHAR,
+    _TAB, _CR, _LF,
+    _BS, _DQ, _SQ, _BT,
+    _EOL, _ANY,
+    _EOF, _WS, _NL, _UNDERSCORE  // these are builtins, not simple char ranges
+};
+
+// -- parse tree node: slot for application data (used by parser) ------
+
+enum DATA_USE { NO_DATA, DATA_VALS, RANGE_DATA, BUILTIN, HEAP_DATA};
+
+typedef union { 
+    struct { // DATA_VALS, opx used for parser op code data...
+        short int idx;
+        char min;       // *N..M repeat
         char max;       // max 256 numeric repeat
-        char sign;      // ~ ! &
-        char is_multi;  // bool flag multi useage
+        char sign;      // ~ ! & pfx
+        char builtin;   // implicit rule, e.g. _NL
+        char is_multi;  // bool flag multi usage
         char multi;     // B idx for A::B (idx may be 0)
-        char c1,c2;     // reseve 8 bytes   
     } opx;
-    struct { // or HEAP_DATA pointer for application data
+    struct { // RANGE_DATA, implicit rule name UTF8 char range
+        int min, max;
+    } range;
+    struct { // HEAP_DATA, pointer for application data
         void* p;
     } ptr;
 } Slot;
 
 // -- parse tree node ------------------------------
 
-typedef struct Node Node;
-
-enum DATA_USE { NO_DATA, DATA_VALS, HEAP_DATA };
+// typedef struct Node Node; // in pPEG.h
 
 struct Node {
-    char tag;      // rule name index
-    char data_use; // enum DATE_USE
-    int start;     // start string slice
-    int end;       // last+1 string slice
+    short int tag; // rule name index
+    char data_use; // enum DATE_USE (use of Slot data)
+    int start;     // start string span
+    int end;       // last+1 string span
     int count;     // nodes count
     Slot data;     // application data -- op codes
     Node* nodes[]; // children node pointers
@@ -125,7 +132,7 @@ char* peg_err_msg[] = {
     "Parse failed"
 };
 
-void panic(char* msg) { // not static, convenient for apps to use this
+void panic(char* msg) {
     printf("*** panic: %s\n", msg);
     exit(PEG_PANIC);
 }
@@ -162,15 +169,15 @@ struct Err {
 
 Err* newErr(int code, int pos) {
     Err* err = malloc(sizeof(Err));
-    if (!err) panic("malloc failed in newErr...");
+    if (!err) panic("malloc..");
     err->err = code;
     err->pos = pos;
     return err;
 }
 
-// == Peg AST ===================================================
+// == Peg peg ===================================================
 
-typedef struct Peg Peg;
+// typedef struct Peg Peg; // in pPEG.h
 
 struct Peg { // parse tree.........
     char* src;   // input string
@@ -179,7 +186,17 @@ struct Peg { // parse tree.........
     Err* err;    // error info
 };
 
-// == parser machine ========================================
+Peg* newPeg(char* src, Node* tree, Peg* gram, Err* err) {
+    Peg* peg = malloc(sizeof(Peg));
+    if (!peg) panic("malloc..");
+    peg->src = src;
+    peg->tree = tree;
+    peg->peg = gram;
+    peg->err = err;
+    return peg;
+}
+
+// == Env for parser machine ========================================
 
 typedef struct {
     char* grammar;  // source text
@@ -202,22 +219,13 @@ typedef struct {
     Node* expected;
 } Env;
 
+/* -- UTF8 utils ----------------------------------------------
 
-void debug_trace(Env *pen, Node *exp);
-void rule_trace_open(Env *pen, int tag);
-void rule_trace_close(Env *pen, int tag, bool result);
-void resolve_id(Env* pen, Node* exp);
-void resolve_rep(Env* pen, Node* exp);
-void resolve_pre(Env* pen, Node* exp);
-void print_line_num(char* p, int pos);
-void print_text(char* str, Node* node);
-
-/* 
-    UTF-8
     0-7F            0xxx xxxx
     80-7FF          110x xxxx 10xx xxxx
     800-7FFF        1110 xxxx 10xx xxxx 10xx xxxx
     10000-10FFFF    1111 0xxx 10xx xxxx 10xx xxxx 10xx xxxx
+
 */
 
 int utf8_size(int x) {
@@ -269,6 +277,211 @@ int utf8_write(char* p, int x) {
     return 4;
 }
 
+// -- node utils ---------------------------------
+
+char* node_text(char* str, Node* nd, char* out, int len) { // TODO len count escapes!!!
+    if (len < 1) return out;
+    int span = nd->end - nd->start; // text len
+    int mid = len >> 1;
+    int end = nd->end;
+    int skip = end; // don't skip ... truncate to len if necessary
+    int rest = end; // not used unless skip ...
+    if (len < span+1) { // truncate or skip ... (allow for '\0' inside len)
+        if (len > 11) { // skip ...
+            skip = nd->start + mid - 3; // " ... " in approx middle
+            rest = nd->end - mid + 3 ;  // " ... " 5 chars + 1 for \0
+        } else { // truncate
+            end = nd->start+len-2;
+        }
+    }
+    for (int i = nd->start; i < end; i += 1) {
+        unsigned char c = str[i];
+        if (c < ' ') {
+            if (c == '\n') strcpy(out, "\\n");
+            else if (c == '\r') strcpy(out, "\\r");
+            else if (c == '\t') strcpy(out, "\\t");
+            else { // \x12 ...
+                sprintf(out, "\\x%02X", c);
+                out += 2;
+            } 
+            out+=2;
+            continue;
+        }
+        if (c == '"' || c == '\\') *out++ = '\\';
+        *out++ = c;
+        if (i == skip) {
+            strcpy(out, " ... ");
+            out += 5;
+            i = rest; // skip to rest
+        } 
+    }
+    return out;
+}
+
+// -- peg print display ---------------------------
+
+void print_text(char* str, Node* node) {
+    char line[80];
+    char* p = node_text(str, node, line, 80);
+    *p = '\0';
+    printf("%s", line);
+}
+
+void print_tag(Peg* peg, int tag) {
+    if (!peg->peg) { // boot grammar...
+        printf("%s", peg_names[tag]);
+        return;
+    }
+    char* src = peg->peg->src;
+    Node* tree = peg->peg->tree;
+    Node* nd = tree->nodes[tag]->nodes[0]; // ID i..j
+    print_text(src, nd);
+}
+
+char* node_quote(char* str, Node* nd, char* out, int len) {
+    *out++ = '"';
+    out = node_text(str, nd, out, len-2);
+    *out++ = '"';
+    return out;
+}    
+
+void print_tree(Peg* peg, Node* nd, int inset, unsigned long long last) {
+    // last is a bit map to flag the last child nodes 
+    for (int j=0; j<inset; j++) {
+        if (j == inset-1) { // max inset ...
+            if (last&(0x1ULL<<inset)) printf("%s", "\u2514\u2500");  // `-
+                else printf("%s", "\u251C\u2500");   // |-
+        }
+        else if (last&(0x1ULL<<(j+1))) printf("%s", "  ");
+            else printf("%s", "\u2502 ");  // |
+    }
+    if (!nd) { printf("NULL\n"); return; }
+    if (nd->count > 0) {
+        print_tag(peg, nd->tag);
+        printf("\n");
+        for (int i=0; i<nd->count; i++) {
+            if (i == nd->count-1) last = last|(0x1ULL<<(inset+1));
+            print_tree(peg, nd->nodes[i], inset+1, last);
+        };
+        return;
+    }
+    // leaf node...
+    print_tag(peg, nd->tag);
+    char txt[50];
+    char* t = &txt[0];
+    t = node_quote(peg->src, nd, t, 49);
+    *t = '\0';       
+    printf(" %s\n", txt);
+}
+
+void print_ptree(Peg* peg) {
+    if (peg && peg->tree) {
+        print_tree(peg, peg->tree, 0, 0);
+    } else {
+        printf("No ptree...\n");
+    }
+}
+
+// -- fault reporting ----------------------------------------
+
+void print_cursor(char* p, int pos) {
+    int i = pos;
+    while ((unsigned char)p[i] >= ' ' && i > 0) i--;
+    if (i>0) i++; // after line break
+    int j = pos;
+    while ((unsigned char)p[j] >= ' ') j++; // \n or \0
+    for (int k=i; k<j; k++) printf("%c", p[k]);
+    printf("\n");
+    for (int k=i; k<pos; k++) {
+        printf(" ");
+        k += utf8_len(p+k)-1;
+    }
+    printf("^\n");
+}
+
+void print_line_num(char* p, int pos) {
+    int cr = 0;
+    int lf = 0;
+    int i = pos;
+    while (i > 0 && (unsigned char)p[i] >= ' ') i--;
+    int col = pos-i;
+    do {
+        if (p[i] == '\n') lf++;
+        if (p[i] == '\r') cr++;
+    } while (i-- > 0);
+    int ln = lf > cr? lf : cr;
+    printf("%d.%d", ln+1, col+1);
+}
+
+// -- fault report -----------------------------------------
+
+void fault_report(Peg* peg) {
+    printf("%s in rule: ", peg_err_msg[peg->err->err]);
+    print_tag(peg, peg->err->fail_rule);
+    printf("\n");
+    if (peg->err->expected) {
+        char open = ' ';
+        char close = ' ';
+        if (peg->err->expected->tag == SQ) { open = '\''; close = '\''; }
+        if (peg->err->expected->tag == CHS) { open = '['; close = ']'; }
+        printf("expected: %c", open);
+        print_text(peg->peg->src, peg->err->expected);
+        printf("%c\n", close);
+    }
+    printf("on line: ");
+    print_line_num(peg->src, peg->err->pos);
+    printf(" at: %d of %lu\n", peg->err->pos, strlen(peg->src));
+    print_cursor(peg->src, peg->err->pos);
+} 
+
+// -- debug trace op codes display ---------------------------------
+
+void show_exp(Env *pen, Node *exp, char* out, int len) {
+    int tag = exp->tag;
+    char *name = peg_names[tag];
+    int n = strlen(name);
+    if (n+2 > len) panic("show_exp overflow...");
+    strcpy(out, name);
+    out += n; // strlen(name);
+    *out++ = ' ';
+    if (tag == ID || tag == SQ || tag == CHS) {
+        out = node_quote(pen->grammar, exp, out, len-(n+3));
+    }
+    if (tag == PRE) {
+        *out++ = exp->data.opx.sign;
+    }
+    if (tag == REP) {
+        int min = exp->data.opx.min;
+        int max = exp->data.opx.max;
+        if (min==0 && max==0) *out++ = '*';
+        if (min==1 && max==0) *out++ = '+';
+        if (min==0 && max==1) *out++ = '?';
+    }
+    *out = '\0';
+}
+
+void debug_trace(Env *pen, Node* exp) {
+    char c = pen->input[pen->pos];
+    if (c == '\n') c = ' ';
+    printf("%d: %c\t", pen->pos, c);
+    char show[100];
+    show_exp(pen, exp, show, 99);
+    printf("%s\n", show);
+}
+
+// -- rule trace ---------------------------------------------
+
+void trace_quote(char* str, int start, int end) {
+    printf("\"");
+    for (int i=start; i<end; i++) {
+        char c = str[i];
+        if (c == '\n') printf("\\n");
+        else if (c == '\"') printf("\\\"");
+        else printf("%c", str[i]);
+    }
+    printf("\"");   
+}
+
 void print_tag_name(Env* pen, int tag) {
     if (!pen->tree) { // boot grammar...
         printf("%s", peg_names[tag]);
@@ -280,6 +493,397 @@ void print_tag_name(Env* pen, int tag) {
     }
 }
 
+void rule_trace_open(Env *pen, int tag) {
+    if (pen->pos > pen->trace_pos) {
+        printf("\n");
+        for (int i=0; i<pen->trace_depth; i++) printf("| ");
+        trace_quote(pen->input, pen->trace_pos, pen->pos);
+        pen->trace_pos = pen->pos;
+    }
+    printf("\n");
+    for (int i=0; i<pen->trace_depth; i++) printf("| ");
+    print_tag_name(pen, tag);
+    pen->trace_depth++;
+    pen->trace_open = true; 
+}
+
+void rule_trace_close(Env *pen, int tag, bool result) {
+    if (pen->pos < pen->trace_pos) {
+        printf(" <= !");
+    }
+    bool txt = pen->trace_pos < pen->pos;
+    if (!pen->trace_open) {
+        if (txt || !result) {
+            printf("\n");
+            for (int i=0; i<pen->trace_depth; i++) printf("| ");
+        }
+    }
+    if (result) {
+        if (txt) trace_quote(pen->input, pen->trace_pos, pen->pos);
+    } else {
+        printf("!");
+    }
+    pen->trace_pos = pen->pos;
+    pen->trace_depth--;
+    pen->trace_open = false;
+}
+
+// -- implicit rules -----------------------------------------------
+
+int implicit_def(char* name) {
+    int n = sizeof(implicit_names)/sizeof(char *); // names count;
+    for (int i=2; i<n; i+=1) {
+        if (strcmp(implicit_names[i], name) == 0) 
+            return i; // index of defined rule
+    }
+    return _NULL; // not defined as an implicit rule
+}
+
+// An implicit definition should never replace a valid implicit char code.
+// For example _FF should not be defined as the FF form-feed char code (0xC),
+// because it is a the intrinsic character code 0xFF. (_FORM-FEED would be OK)
+// To prevent such a bug from being introduced the implicit_rule() first checks
+// if the rule name is a valid char code, and only then checks if it is defined. 
+// Thus a bad definition trying to replace an intrinsic char will never work.
+
+int implicit_rule(char* name, int len) {
+    if (name[0] != '_') return _NULL;
+    if (len == 1) return implicit_def(name); // _UNDERSCORE
+    bool range = false; // range example: _123-FFF 
+    for (int i=1; i<len; i+=1) { // validate as an intrinsic char...
+        char c = name[i];        // [0-9A-F]+ ('-' [0-9A-F]+)?
+        if ((c >= 'A' && c <= 'F') || (c>='0' && c<='9')) continue;
+        if (c == '-') { // only one '-' 
+            if (i > 0 && i < len-1 && !range) {
+                range = true; // with at least one digit either side..
+                continue;
+            }
+        }
+        return implicit_def(name); // implicit definition or _NULL
+    }
+    return _CHAR; // implicit character code 
+}
+
+bool implicit_range(Node* exp, int min, int max) {
+    exp->data.range.min = min;
+    exp->data.range.max = max;
+    exp->data_use = RANGE_DATA;
+    return true;
+}
+
+bool implicit_builtin(Node* exp, int code) {
+    exp->data.opx.builtin = code;
+    exp->data_use = BUILTIN;
+    return true;
+}
+
+bool resolve_implicit(Node* exp, char* name, int len) {
+    int imp = implicit_rule(name, len); // validate hex digits..
+    if (imp == _NULL) return false;
+    if (imp == _CHAR) {
+        int min = 0, max = 0;
+        for (int i=1; i<len; i+=1) {
+            int c = (unsigned char)name[i];
+            if (c == '-') { 
+                for (int j=i+1; j<len; j+=1) {
+                    int c = (unsigned char)name[j];
+                    max = (max<<4) + c-(c>='0'&&c<='9'? '0' : 'A');
+                }
+                break;
+            };
+            min = (min<<4) + c-(c>='0'&&c<='9'? '0' : 'A');
+        }
+        if (max < min) max = min;
+        return implicit_range(exp, min, max);
+    }
+    // if (imp == _WS) return implicit_range(exp, 0x9, 0x20); // => BUILTIN: _9-D / ' '
+    if (imp == _TAB) return implicit_range(exp, 0x9, 0x9);
+    if (imp == _LF) return implicit_range(exp, 0xA, 0xA);
+    if (imp == _CR) return implicit_range(exp, 0xD, 0xD);
+    if (imp == _BS) return implicit_range(exp, 0x5C, 0x5C);
+    if (imp == _SQ) return implicit_range(exp, 0x27, 0x27);
+    if (imp == _DQ) return implicit_range(exp, 0x22, 0x22);
+    if (imp == _BT) return implicit_range(exp, 0x60, 0x60); // back tick `
+    if (imp == _EOL) return implicit_range(exp, 0xA, 0xD);
+    if (imp == _ANY) return implicit_range(exp, 0x0, 0x10FFFF);
+    
+
+    if (imp == _EOF) return implicit_builtin(exp, _EOF);
+    if (imp == _NL) return implicit_builtin(exp, _NL);
+    if (imp == _WS) return implicit_builtin(exp, _WS);
+    if (imp == _UNDERSCORE) return implicit_builtin(exp, _UNDERSCORE);
+
+    return false; // undefined implicit rule name
+}
+
+// -- resolve opx data slot extensions -------------------
+
+void resolve_id(Env* pen, Node* exp) {
+    char name[50];
+    char* p = &name[0];
+    p = node_text(pen->grammar, exp, p, 49);
+    *p = '\0';
+    int len = p-name;
+    for (int i=0; i<pen->tree->count; i++) {
+        Node* id = pen->tree->nodes[i]->nodes[0];
+        int n = id->end-id->start;
+        if (n != len) continue;
+        bool match = true;
+        for (int j=0; j<len; j++) {
+            if (pen->grammar[id->start+j] != name[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (!match) continue;
+        exp->data.opx.idx = i;
+        exp->data_use = DATA_VALS;
+        return;
+    }
+    if (!resolve_implicit(exp, name, len)) {
+        char msg[50];
+        sprintf(msg, "*** Undefined rule: %s\n", name); // TODO improve this..
+        panic(msg);
+    }
+}
+
+unsigned char rep_num(char* src, int start, int end) {
+    int num = 0;        
+    for (int i = start; i < end; i++) {
+        num = num*10 + src[i]-'0';
+    }
+    if (num > 255) {
+        char msg[50];
+        sprintf(msg, "Repeat * %d is too big, limit 255\n", num);
+        panic(msg);
+    }
+    return (unsigned char)num;
+}
+
+void resolve_rep(Env* pen, Node* exp) {
+    unsigned char max=0, min=0;
+    Node* sfx = exp->nodes[1];
+    if (sfx->tag == SFX) {
+        char sign = pen->grammar[sfx->start];
+        if (sign == '+') min = 1;
+        if (sign == '?') max = 1;
+    } else if (sfx->tag == NUM) {
+        min = rep_num(pen->grammar, sfx->start, sfx->end);
+        max = min;
+    } else if (sfx->tag == RANGE) {
+        Node* num1 = sfx->nodes[0];
+        min = rep_num(pen->grammar, num1->start, num1->end);
+        Node* num2 = sfx->nodes[1];
+        max = rep_num(pen->grammar, num2->start, num2->end);
+    } else panic("woops..");
+    exp->data.opx.min = min;
+    exp->data.opx.max = max;
+    exp->data_use = DATA_VALS;
+}
+
+void resolve_pre(Env* pen, Node* exp) {
+    Node* pfx = exp->nodes[0];
+    char sign = pen->grammar[pfx->start];
+    exp->data.opx.sign = sign;
+    exp->data_use = DATA_VALS;
+}
+
+// == bootstrap peg_code constructors =================================
+
+Node *ops(int tag, int n, ...) {
+    Node *nd = (Node *)malloc(sizeof(Node)+n*sizeof(Node *));
+    if (nd == NULL) return NULL;
+    nd->tag = tag; // rule name index
+    nd->count = n;
+    va_list argp;
+    va_start(argp, n);
+    for (int i=0; i<n; i+=1) {
+        nd->nodes[i] = va_arg(argp, void*);
+    }
+    va_end(argp);
+    return nd;
+}
+
+int findstr(char *str) { // index of str span peg_grammar
+    char* src = peg_grammar;
+    char* p = strstr(src, str);
+    if (p) return p - src;
+    char msg[100];
+    sprintf(msg, "Boot: '%s' not found in peg grammar...\n", str);
+    panic(msg);
+    return 0;
+}
+
+int rule_index(const char *name) { // index of name in peg_names
+    int n = sizeof(peg_names)/sizeof(char *); // rule_count;
+    for (int i=0; i<n; i+=1) {
+        if (strcmp(peg_names[i], name) == 0) return i;
+    }
+    char msg[100];
+    sprintf(msg, "Boot: '%s' is not a peg grammar rule name... \n", name);
+    panic(msg);
+    return 0;
+}
+
+Node *op(int tag, char *str) { // tag: ID, SQ, or CHS
+    Node *nd = (Node *)malloc(sizeof(Node));
+    if (nd == NULL) return NULL;
+    nd->tag = tag;
+    nd->count = 0;
+    int i = findstr(str); // index in peg_grammar text
+    nd->start = i;
+    nd->end = i + strlen(str);
+    if (tag == ID) {
+        if (peg_grammar[i] == '_') {   // chk for implicit char rule...
+            char c = peg_grammar[i+1]; // let run() resolve it...
+            if (c>='0' && c<='9' || c>='A' && c<='F') return nd;
+            if (strcmp(str, "_WS") == 0) return nd;
+            if (strcmp(str, "_EOL") == 0) return nd;
+        } 
+        nd->data.opx.idx = rule_index(str);
+        nd->data_use = DATA_VALS;
+    }
+    return nd;
+}
+
+Node *opREP(Node *opx, char* sfx) { // rep(op, sfx)
+    Node *nd = (Node *)malloc(sizeof(Node)+2*sizeof(Node *));
+    if (nd == NULL) return NULL;
+    nd->tag = REP;
+    nd->count = 2;
+    nd->nodes[0] = opx;
+    nd->nodes[1] = op(SFX, sfx);
+    unsigned char min = 0, max = 0;
+    if (sfx[0] == '+') min = 1;
+    if (sfx[0] == '?') max = 1;
+    nd->data.opx.min = min;
+    nd->data.opx.max = max;
+    nd->data_use = DATA_VALS;
+    return nd;
+}
+
+Node *opPRE(char* pfx, Node* opx) {
+    Node *nd = (Node *)malloc(sizeof(Node)+2*sizeof(Node *));
+    if (nd == NULL) return NULL;
+    nd->tag = PRE;
+    nd->count = 2;
+    nd->nodes[0] = op(PFX, pfx);
+    nd->nodes[1] = opx;
+    nd->data.opx.sign = pfx[0];
+    nd->data_use = DATA_VALS;
+    return nd;
+}
+
+// -- bootstrap peg grammar parse tree --------------------
+
+Node *boot_code() {
+    return ops(PEG, 22,
+    //   Peg   = _ (rule _)+
+    ops(RULE, 2, op(ID, "Peg"),
+        ops(SEQ, 2, op(ID, "_"),
+            opREP(ops(SEQ, 2, op(ID, "rule"),
+                        op(ID, "_")), "+"))),               
+    //   rule  = id _ '=' _ alt
+    ops(RULE, 2, op(ID, "rule"),
+        ops(SEQ, 5, op(ID, "id"), op(ID, "_"), op(SQ, "="),
+                op(ID, "_"), op(ID, "alt"))),           
+
+    //  alt   = seq ('/'_ seq)*
+    ops(RULE, 2, op(ID, "alt"),
+        ops(SEQ, 2, op(ID, "seq"),
+            opREP(ops(SEQ, 3, op(SQ, "/"), op(ID, "_"),
+                    op(ID, "seq")), "*"))),        
+    //  seq   = rep*
+    ops(RULE, 2, op(ID, "seq"),
+        opREP(op(ID, "rep"), "*")),
+    //   rep   = pre sfx? _
+    ops(RULE, 2, op(ID, "rep"),
+        ops(SEQ, 3, op(ID, "pre"),
+            opREP(op(ID, "sfx"), "?"), op(ID, "_"))),                   
+    //   pre   = pfx? term                  
+    ops(RULE, 2, op(ID, "pre"),
+        ops(SEQ, 2, opREP(op(ID, "pfx"), "?"),
+            op(ID, "term"))),                   
+    //   term  = call / quote / chars / group
+    ops(RULE, 2, op(ID, "term"),
+        ops(ALT, 5, op(ID, "call"), op(ID, "quote"), 
+            op(ID, "chars"), op(ID, "group"), op(ID, "extn"))),
+    //   group = '(' _ alt _ ')'
+    ops(RULE, 2, op(ID, "group"),
+        ops(SEQ, 5, op(SQ, "("), op(ID, "_"), op(ID, "alt"),
+            op(ID, "_"), op(SQ, ")"))),            
+
+    //   call  = at? id multi? _ !'='
+    ops(RULE, 2, op(ID, "call"),
+        ops(SEQ, 5, opREP(op(ID, "at"), "?"),
+            op(ID, "id"), opREP(op(ID, "multi"), "?"),
+            op(ID, "_"), opPRE("!", op(SQ, "=")))),
+    //   at    = '@'
+    ops(RULE, 2, op(ID, "at"), op(SQ, "@")),                      
+    //   mulit = '::' id
+    ops(RULE, 2, op(ID, "multi"),
+        ops(SEQ, 2, op(SQ, "::"), op(ID, "id"))),                      
+
+    //   id    = [a-zA-Z_] [a-zA-Z0-9_-]*
+    ops(RULE, 2, op(ID, "id"),
+        ops(SEQ, 2, op(CHS, "a-zA-Z_"), 
+            opREP(op(CHS, "a-zA-Z0-9_-"), "*"))),
+
+    //   pfx   = [&!~]
+    ops(RULE, 2, op(ID, "pfx"), op(CHS, "~!&")),                      
+    //   sfx   = [+?] / '*' range?                      
+    ops(RULE, 2, op(ID, "sfx"),
+        ops(ALT, 2, op(CHS, "+?"),
+            ops(SEQ, 2, op(SQ, "*"),
+                opREP(op(ID, "range"), "?")))),
+    // range = num ('..' num)?
+    ops(RULE, 2, op(ID, "range"),
+        ops(SEQ, 2, op(ID, "num"),
+            opREP(ops(SEQ, 2, op(SQ, ".."), op(ID, "num")), "?"))),
+    // num = [0-9]+
+    ops(RULE, 2, op(ID, "num"), opREP(op(CHS, "0-9"), "+")),
+
+    //   quote = ['] sq ['] 'i'?
+    ops(RULE, 2, op(ID, "quote"),
+        ops(SEQ, 4, op(SQ, "'"), op(ID, "sq"), op(SQ, "'"),
+                opREP(op(SQ, "i"), "?"))),                
+    //   sq    = ~[']*
+    ops(RULE, 2, op(ID, "sq"),
+        opREP(opPRE("~", op(SQ, "'")), "*")),                      
+    //   chars = '[' chs ']'                
+    ops(RULE, 2, op(ID, "chars"),
+        ops(SEQ, 3, op(SQ, "["), op(ID, "chs"), op(SQ, "]"))),                
+    //   chs   =  ~']'*                     
+    ops(RULE, 2, op(ID, "chs"),
+        opREP(opPRE("~", op(SQ, "]")), "*")),
+    //   extn = '<' ~'>'* '>'
+    ops(RULE, 2, op(ID, "extn"),
+        ops(SEQ, 3, op(SQ, "<"),
+            opREP(opPRE("~", op(SQ, ">")), "*"),
+            op(SQ, ">"))),                   
+    //   _  = (_WS+ / '#' ~_EOL*)*
+    ops(RULE, 2, op(ID, "_"),
+        opREP(ops(ALT, 2, opREP(op(ID, "_WS"), "+"),
+            ops(SEQ, 2, op(SQ, "#"),
+                opREP(opPRE("~", op(ID, "_EOL")), "*"))), "*"))              
+    );
+}
+
+// == Bootstrap ======================================
+
+Peg* BOOT = NULL;
+
+// BOOT = { peg_grammar, boot_code(), NULL};
+void bootstrap() {
+    Peg* peg = (Peg *)malloc(sizeof(Peg));
+    if (!peg) panic("boot malloc..");
+    peg->src = peg_grammar;
+    peg->tree = boot_code();
+    peg->peg = NULL;
+    peg->err = NULL;
+    BOOT = peg;
+}
+
 // == parser machine engine ==============================
 
 bool run(Env *pen, Node *exp) {
@@ -287,13 +891,67 @@ bool run(Env *pen, Node *exp) {
     switch (exp->tag) {
     case ID: {
         if (exp->data_use == NO_DATA) resolve_id(pen, exp);
+        if (exp->data_use == RANGE_DATA) { // implicit char rule name
+            if (pen->pos >= pen->end) return false;
+            int size = 1; // char bytes...
+            int c = (unsigned char)pen->input[pen->pos];
+            if (c > 127) {
+                c = utf8_read(pen->input);
+                size = utf8_size(c);
+            }
+            if (c < exp->data.range.min) return false;
+            if (c > exp->data.range.max) return false;
+            pen->pos += size;
+            return true;
+        }
+        if (exp->data_use == BUILTIN) { // implicit rule...
+            switch (exp->data.opx.builtin) {
+                case _WS: { // _WS = _9-D / ' '
+                    if (pen->pos >= pen->end) return false;
+                    char c = pen->input[pen->pos];
+                    if (c == 0x20 || (c <= 0xD && c>= 0x9)) {
+                        pen->pos++;
+                        return true;
+                    }
+                    return false;              
+                }
+                case _UNDERSCORE: { // _ = _WS*
+                    while (pen->pos < pen->end) {
+                        char c = pen->input[pen->pos];
+                        if (c == 0x20 || (c <= 0xD && c>= 0x9)) {
+                            pen->pos++;
+                        } else break;
+                    }
+                    return true;
+                }
+                case _NL: { // _NL = _LF / CR LF?
+                    if (pen->pos >= pen->end) return false;
+                    char c = pen->input[pen->pos];
+                    if (c=='\n') {
+                        pen->pos++;
+                        return true;
+                    }
+                    if (c=='\r') {
+                        pen->pos++;
+                        if (pen->input[pen->pos] == '\n') pen->pos++;
+                        return true;                       
+                    }
+                    return false;                   
+                }
+                case: _EOF: { // !_ANY
+                    if (pen->pos >= pen->end) return true;
+                    return false;
+                }
+                default: panic("undefined builtin...");
+            }
+        }
         int tag = exp->data.opx.idx;
         int start = pen->pos;
         int stack = pen->stack;
         Node* rule = pen->tree->nodes[tag]->nodes[1];
         if (pen->flags == 2) rule_trace_open(pen, tag);
         if (pen->depth++ > MAX_STACK)
-            panic("call reciursion > MAX_STACK ....");
+            panic("call recursion > MAX_STACK ....");
         bool result = run(pen, rule);
         pen->depth--;
         if (pen->flags == 2) rule_trace_close(pen, tag, result);
@@ -455,8 +1113,9 @@ bool run(Env *pen, Node *exp) {
         }
         return false;
     }
-    case CALL: { // at? id (":" id)?
-        if (exp->count != 2) { // both operators:  @X:Y
+    case CALL: { // at? id ("::" id)?
+        if (exp->count != 2) { // both operators:  @X::Y
+
             printf("*** Not implemented: "); // TODO improve err reporting
             print_text(pen->grammar, exp);
             printf("\n");
@@ -512,12 +1171,15 @@ bool run(Env *pen, Node *exp) {
         } // TODO compile time key, extern linkage?
         switch (key) {
             case 0: return false; // <>
-            case 0x00666F6F: { // foo
+            case 0x00666F6F: { // foo  TODO .....
                 printf("foo....");
                 return true;
             }
             default: { // TODO better err reporting...
-                printf("**** Undefined extn: ");
+                // char msg[50];
+                // sprintf(msg, "woops: undefined op: %d\n", exp->tag);
+                // panic(msg);
+                printf("**** Undefined extn: ...\n");
                 print_text(pen->grammar, exp);
                 printf("\n");
                 return false;
@@ -534,553 +1196,7 @@ bool run(Env *pen, Node *exp) {
     } // switch
 } // run
 
-// -- node utils ---------------------------------
-
-char* node_text(char* str, Node* nd, char* out, int len) {
-    if (len < 1) return out;
-    int span = nd->end - nd->start; // text len
-    int mid = len >> 1;
-    int end = nd->end;
-    int skip = end; // don't skip ... truncate to len if necessary
-    int rest = end; // not used unless skip ...
-    if (len < span) { // trucate or skip ...
-        if (len > 11) { // skip ...
-            skip = nd->start + mid - 3; // " ... " in approx middle
-            rest = nd->end - mid + 2 ;  // " ... " 5 chars
-        } else { // truncate
-            end = nd->start+len;
-        }
-    }
-    for (int i = nd->start; i < end; i += 1) {
-        unsigned char c = str[i];
-        if (c < ' ') {
-            if (c == '\n') strcpy(out, "\\n");
-            else if (c == '\r') strcpy(out, "\\r");
-            else if (c == '\t') strcpy(out, "\\t");
-            else { // \x12 ...
-                sprintf(out, "\\x%02X", c);
-                out += 2;
-            } 
-            out+=2;
-            continue;
-        }
-        if (c == '"' || c == '\\') *out++ = '\\';
-        *out++ = c;
-        if (i == skip) {
-            strcpy(out, " ... ");
-            out += 5;
-            i = rest; // skip to rest
-        } 
-    }
-    return out;
-}
-
-void print_text(char* str, Node* node) {
-    char line[80];
-    char* p = &line[0];
-    p = node_text(str, node, p, 79);
-    *p = '\0';
-    printf("%s", line);
-}
-
-// -- resolve opx data slot extensions -------------------
-
-void resolve_id(Env* pen, Node* exp) {
-    char name[50];
-    char* p = &name[0];
-    p = node_text(pen->grammar, exp, p, 49);
-    *p = '\0';
-    int len = p-name; 
-    for (int i=0; i<pen->tree->count; i++) {
-        Node* id = pen->tree->nodes[i]->nodes[0];
-        int n = id->end-id->start;
-        if (n != len) continue;
-        bool match = true;
-        for (int j=0; j<len; j++) {
-            if (pen->grammar[id->start+j] != name[j]) {
-                match = false;
-                break;
-            }
-        }
-        if (!match) continue;
-        exp->data.opx.idx = i;
-        exp->data_use = DATA_VALS;
-        return;
-    }
-    char msg[50];
-    sprintf(msg, "*** Undefined rule: %s\n", name); // TODO improve this..
-    panic(msg);
-}
-
-unsigned char rep_num(char* src, int start, int end) {
-    int num = 0;        
-    for (int i = start; i < end; i++) {
-        num = num*10 + src[i]-'0';
-    }
-    if (num > 255) {
-        char msg[50];
-        sprintf(msg, "Repeat * %d is too big, limit 255\n", num);
-        panic(msg);
-    }
-    return (unsigned char)num;
-}
-
-void resolve_rep(Env* pen, Node* exp) {
-    unsigned char max=0, min=0;
-    Node* sfx = exp->nodes[1];
-    if (sfx->tag == SFX) {
-        char sign = pen->grammar[sfx->start];
-        if (sign == '+') min = 1;
-        if (sign == '?') max = 1;
-    } else if (sfx->tag == NUM) {
-        min = rep_num(pen->grammar, sfx->start, sfx->end);
-        max = min;
-    } else if (sfx->tag == RANGE) {
-        Node* num1 = sfx->nodes[0];
-        min = rep_num(pen->grammar, num1->start, num1->end);
-        Node* num2 = sfx->nodes[1];
-        max = rep_num(pen->grammar, num2->start, num2->end);
-    } else panic("woops..");
-    exp->data.opx.min = min;
-    exp->data.opx.max = max;
-    exp->data_use = DATA_VALS;
-}
-
-void resolve_pre(Env* pen, Node* exp) {
-    Node* pfx = exp->nodes[0];
-    char sign = pen->grammar[pfx->start];
-    exp->data.opx.sign = sign;
-    exp->data_use = DATA_VALS;
-}
-
-int hex4(char* src) {
-    int num = 0;        
-    for (int i = 0; i < 4; i++) {
-        char c = src[i];
-        if (c>='0' & c<='9')
-            num = num*16 + c-'0';
-        else if (c>='a' & c<='z')
-            num = num*16 + c-'a'+10;
-        else if (c>='A' & c<='Z')
-            num = num*16 + c-'A'+10;
-        else panic("escape \\u0000, expecting 4 hex digits...");
-    }
-    return num;
-}
-
-int escape(char* str, int start, int end, char* out) {
-    char* out0 = out;
-    for (int i=start; i<end; i+=1) {
-        char c = str[i];
-        if (c == '\\') {
-            char x = str[++i]; // i advanced, skip over backslash
-            if (x == 'u') {
-                int code = hex4(str+i+1);
-                int size = utf8_write(out, code);
-                printf("code=%x size=%d\n", code, size);
-                out += size;
-                i += 4; // i -> u
-                continue;
-            }
-            if (x == 'n') c = '\n';
-            if (x == 'r') c = '\r';
-            if (x == 't') c = '\t';
-        }
-        *out++ = c;
-    }
-    return (int)(out-out0);
-}
-
-void resolve_chs(Env* pen, Node* exp) {
-    char buf[127]; // limits 'abc' and [abc] to a long line..
-    if (127 < exp->end - exp->start) 
-        panic("quote or chars too long, 127 char limit...");
-    int len = escape(pen->input, exp->start, exp->end, buf);
-    printf("len=%d\n",len);
-
-    // TODO malloc heap data for node.....
-
-}
-
-// -- debug trace op codes display ---------------------------------
-
-char* node_quote(char* str, Node* nd, char* out, int len) {
-    *out++ = '"';
-    out = node_text(str, nd, out, len-2);
-    *out++ = '"';
-    return out;
-}    
-
-void show_exp(Env *pen, Node *exp, char* out, int len) {
-    int tag = exp->tag;
-    char *name = peg_names[tag];
-    int n = strlen(name);
-    if (n+2 > len) panic("show_exp overflow...");
-    strcpy(out, name);
-    out += n; // strlen(name);
-    *out++ = ' ';
-    if (tag == ID || tag == SQ || tag == CHS) {
-        out = node_quote(pen->grammar, exp, out, len-(n+3));
-    }
-    if (tag == PRE) {
-        *out++ = exp->data.opx.sign;
-    }
-    if (tag == REP) {
-        int min = exp->data.opx.min;
-        int max = exp->data.opx.max;
-        if (min==0 && max==0) *out++ = '*';
-        if (min==1 && max==0) *out++ = '+';
-        if (min==0 && max==1) *out++ = '?';
-    }
-    *out = '\0';
-}
-
-void debug_trace(Env *pen, Node* exp) {
-    char c = pen->input[pen->pos];
-    if (c == '\n') c = ' ';
-    printf("%d: %c\t", pen->pos, c);
-    char show[100];
-    show_exp(pen, exp, show, 99);
-    printf("%s\n", show);
-}
-
-// -- rule trace ---------------------------------------------
-
-void trace_quote(char* str, int start, int end) {
-    printf("\"");
-    for (int i=start; i<end; i++) {
-        char c = str[i];
-        if (c == '\n') printf("\\n");
-        else if (c == '\"') printf("\\\"");
-        else printf("%c", str[i]);
-    }
-    printf("\"");   
-}
-
-void rule_trace_open(Env *pen, int tag) {
-    if (pen->pos > pen->trace_pos) {
-        printf("\n");
-        for (int i=0; i<pen->trace_depth; i++) printf("| ");
-        trace_quote(pen->input, pen->trace_pos, pen->pos);
-        pen->trace_pos = pen->pos;
-    }
-    printf("\n");
-    for (int i=0; i<pen->trace_depth; i++) printf("| ");
-    print_tag_name(pen, tag);
-    pen->trace_depth++;
-    pen->trace_open = true; 
-}
-
-void rule_trace_close(Env *pen, int tag, bool result) {
-    if (pen->pos < pen->trace_pos) {
-        printf(" <= !");
-    }
-    bool txt = pen->trace_pos < pen->pos;
-    if (!pen->trace_open) {
-        if (txt || !result) {
-            printf("\n");
-            for (int i=0; i<pen->trace_depth; i++) printf("| ");
-        }
-    }
-    if (result) {
-        if (txt) trace_quote(pen->input, pen->trace_pos, pen->pos);
-    } else {
-        printf("!");
-    }
-    pen->trace_pos = pen->pos;
-    pen->trace_depth--;
-    pen->trace_open = false;
-}
-
-// -- fault reporting ----------------------------------------
-
-void print_cursor(char* p, int pos) {
-    int i = pos;
-    while ((unsigned char)p[i] >= ' ' && i > 0) i--;
-    if (i>0) i++; // after line break
-    int j = pos;
-    while ((unsigned char)p[j] >= ' ') j++; // \n or \0
-    for (int k=i; k<j; k++) printf("%c", p[k]);
-    printf("\n");
-    for (int k=i; k<pos; k++) {
-        printf(" ");
-        k += utf8_len(p+k)-1;
-    }
-    printf("^\n");
-}
-
-void print_line_num(char* p, int pos) {
-    int cr = 0;
-    int lf = 0;
-    int i = pos;
-    while (i > 0 && (unsigned char)p[i] >= ' ') i--;
-    // while (i > 0 && p[i] != '\n' && p[i] != '\r') i--;
-    int col = pos-i;
-    do {
-        if (p[i] == '\n') lf++;
-        if (p[i] == '\r') cr++;
-    } while (i-- > 0);
-    int ln = lf > cr? lf : cr;
-    printf("%d.%d", ln+1, col+1);
-}
-
-// == bootstrap peg_code constructors =================================
-
-Node *ops(int tag, int n, ...) {
-    Node *nd = (Node *)malloc(sizeof(Node)+n*sizeof(Node *));
-    if (nd == NULL) return NULL;
-    nd->tag = tag; // rule name index
-    nd->count = n;
-    va_list argp;
-    va_start(argp, n);
-    for (int i=0; i<n; i+=1) {
-        nd->nodes[i] = va_arg(argp, void*);
-    }
-    va_end(argp);
-    return nd;
-}
-
-int findstr(char *str) { // index of str span peg_grammar
-    char* src = peg_grammar;
-    char* p = strstr(src, str);
-    if (p) return p - src;
-    char msg[100];
-    sprintf(msg, "Boot: '%s' not found in peg grammar...\n", str);
-    panic(msg);
-    return 0;
-}
-
-int rule_index(const char *name) { // index of name in peg_names
-    int n = sizeof(peg_names)/sizeof(char *); // rule_count;
-    for (int i=0; i<n; i+=1) {
-        if (strcmp(peg_names[i], name) == 0) return i;
-    }
-    char msg[100];
-    sprintf(msg, "Boot: '%s' is not a peg grammar rule name... \n", name);
-    panic(msg);
-    return 0;
-}
-
-Node *op(int tag, char *str) { // tag: ID, SQ, or CHS
-    Node *nd = (Node *)malloc(sizeof(Node));
-    if (nd == NULL) return NULL;
-    nd->tag = tag;
-    nd->count = 0;
-    int i = findstr(str); // index in peg_grammar text
-    nd->start = i;
-    nd->end = i + strlen(str);
-    if (tag == ID) {
-        nd->data.opx.idx = rule_index(str);
-        nd->data_use = DATA_VALS;
-    }
-    return nd;
-}
-
-Node *opREP(Node *opx, char* sfx) { // rep(op, sfx)
-    Node *nd = (Node *)malloc(sizeof(Node)+2*sizeof(Node *));
-    if (nd == NULL) return NULL;
-    nd->tag = REP;
-    nd->count = 2;
-    nd->nodes[0] = opx;
-    nd->nodes[1] = op(SFX, sfx);
-    unsigned char min = 0, max = 0;
-    if (sfx[0] == '+') min = 1;
-    if (sfx[0] == '?') max = 1;
-    nd->data.opx.min = min;
-    nd->data.opx.max = max;
-    nd->data_use = DATA_VALS;
-    return nd;
-}
-
-Node *opPRE(char* pfx, Node* opx) {
-    Node *nd = (Node *)malloc(sizeof(Node)+2*sizeof(Node *));
-    if (nd == NULL) return NULL;
-    nd->tag = PRE;
-    nd->count = 2;
-    nd->nodes[0] = op(PFX, pfx);
-    nd->nodes[1] = opx;
-    nd->data.opx.sign = pfx[0];
-    nd->data_use = DATA_VALS;
-    return nd;
-}
-
-// -- bootstrap peg grammar parse tree --------------------
-
-Node *boot_code() {
-    return ops(PEG, 23,  // 20 before CALL, AT, MULTI
-    //   Peg   = _ (rule _)+
-    ops(RULE, 2, op(ID, "Peg"),
-        ops(SEQ, 2, op(ID, "_"),
-            opREP(ops(SEQ, 2, op(ID, "rule"),
-                        op(ID, "_")), "+"))),               
-    //   rule  = id _ '=' _ alt
-    ops(RULE, 2, op(ID, "rule"),
-        ops(SEQ, 5, op(ID, "id"), op(ID, "_"), op(SQ, "="),
-                op(ID, "_"), op(ID, "alt"))),           
-
-    //   alt   = seq (_ '/' _ seq)*
-    // ops(RULE, 2, op(ID, "alt"),
-    //     ops(SEQ, 2, op(ID, "seq"),
-    //         opREP(ops(SEQ, 4, op(ID, "_"), op(SQ, "/"), op(ID, "_"),
-    //                 op(ID, "seq")), "*"))),
-    //  alt   = seq ('/' _ seq)*
-    ops(RULE, 2, op(ID, "alt"),
-        ops(SEQ, 2, op(ID, "seq"),
-            opREP(ops(SEQ, 3, op(SQ, "/"), op(ID, "_"),
-                    op(ID, "seq")), "*"))),        
-    //   seq   = rep (' '+ rep)*            
-    // ops(RULE, 2, op(ID, "seq"),
-    //     ops(SEQ, 2, op(ID, "rep"),
-    //         opREP(ops(SEQ, 2, opREP(op(SQ, " "), "+"),
-    //                         op(ID, "rep")), "*"))),        
-    //  seq   = rep _ (rep _)*
-    ops(RULE, 2, op(ID, "seq"),
-        ops(SEQ, 3, op(ID, "rep"), op(ID, "_"),
-            opREP(ops(SEQ, 2, op(ID, "rep"), op(ID, "_")), "*"))),
-    //   rep   = pre sfx?
-    ops(RULE, 2, op(ID, "rep"),
-        ops(SEQ, 2, op(ID, "pre"),
-            opREP(op(ID, "sfx"), "?"))),                   
-    //   pre   = pfx? term                  
-    ops(RULE, 2, op(ID, "pre"),
-        ops(SEQ, 2, opREP(op(ID, "pfx"), "?"),
-            op(ID, "term"))),                   
-    //   term  = call / quote / chars / group
-    ops(RULE, 2, op(ID, "term"),
-        ops(ALT, 5, op(ID, "call"), op(ID, "quote"), 
-            op(ID, "chars"), op(ID, "group"), op(ID, "extn"))),
-    //   group = '(' _ alt _ ')'
-    ops(RULE, 2, op(ID, "group"),
-        ops(SEQ, 5, op(SQ, "("), op(ID, "_"), op(ID, "alt"),
-            op(ID, "_"), op(SQ, ")"))),            
-
-    //   call  = at? id multi? _ !'='
-    ops(RULE, 2, op(ID, "call"),
-        ops(SEQ, 5, opREP(op(ID, "at"), "?"),
-            op(ID, "id"), opREP(op(ID, "multi"), "?"),
-            op(ID, "_"), opPRE("!", op(SQ, "=")))),
-    //   at    = '@'
-    ops(RULE, 2, op(ID, "at"), op(SQ, "@")),                      
-    //   mulit = ':' id
-    ops(RULE, 2, op(ID, "multi"),
-        ops(SEQ, 2, op(SQ, ":"), op(ID, "id"))),                      
-
-    //   id    = [a-zA-Z_] [a-zA-Z0-9_]*
-    ops(RULE, 2, op(ID, "id"),
-        ops(SEQ, 2, op(CHS, "a-zA-Z_"), 
-            opREP(op(CHS, "a-zA-Z0-9_"), "*"))),
-
-    //   pfx   = [&!~]
-    ops(RULE, 2, op(ID, "pfx"), op(CHS, "~!&")),                      
-    //   sfx   = [+?] / '*' range?                      
-    ops(RULE, 2, op(ID, "sfx"),
-        ops(ALT, 2, op(CHS, "+?"),
-            ops(SEQ, 2, op(SQ, "*"),
-                opREP(op(ID, "range"), "?")))),
-    // range = num ('..' num)?
-    ops(RULE, 2, op(ID, "range"),
-        ops(SEQ, 2, op(ID, "num"),
-            opREP(ops(SEQ, 2, op(SQ, ".."), op(ID, "num")), "?"))),
-    // num = [0-9]+
-    ops(RULE, 2, op(ID, "num"), opREP(op(CHS, "0-9"), "+")),
-
-    //   quote = ['] sq ['] 'i'?
-    ops(RULE, 2, op(ID, "quote"),
-        ops(SEQ, 4, op(SQ, "'"), op(ID, "sq"), op(SQ, "'"),
-                opREP(op(SQ, "i"), "?"))),                
-    //   sq    = ~[']*
-    ops(RULE, 2, op(ID, "sq"),
-        opREP(opPRE("~", op(SQ, "'")), "*")),                      
-    //   chars = '[' chs ']'                
-    ops(RULE, 2, op(ID, "chars"),
-        ops(SEQ, 3, op(SQ, "["), op(ID, "chs"), op(SQ, "]"))),                
-    //   chs   =  ~']'*                     
-    ops(RULE, 2, op(ID, "chs"),
-        opREP(opPRE("~", op(SQ, "]")), "*")),
-    //   extn = '<' ~'>'* '>'
-    ops(RULE, 2, op(ID, "extn"),
-        ops(SEQ, 3, op(SQ, "<"),
-            opREP(opPRE("~", op(SQ, ">")), "*"),
-            op(SQ, ">"))),                   
-    //   _     = ([ \r\n\t]+ / '#' ~[\n\r]*)*
-    ops(RULE, 2, op(ID, "_"),
-        opREP(ops(ALT, 2, opREP(op(CHS, " \n\r\t"), "+"),
-            ops(SEQ, 2, op(SQ, "#"),
-                opREP(opPRE("~", op(CHS, "\n\r")), "*"))), "*"))              
-    );
-}
-
-// -- AST print display ---------------------------
-
-void print_tag(Peg* ast, int tag) {
-    if (!ast->peg) { // boot grammar...
-        printf("%s", peg_names[tag]);
-        return;
-    }
-    char* src = ast->peg->src;
-    Node* peg = ast->peg->tree;
-    Node* nd = peg->nodes[tag]->nodes[0]; // ID i..j
-    print_text(src, nd);
-}
-
-void print_tree(Peg* ast, Node* nd, int inset, int last) {
-    for (int j=0; j<inset; j++) {
-        if (j == inset-1) { // max inset ...
-            if (last&(0x1<<inset)) printf("%s", "\u2514\u2500");  // `-
-                else printf("%s", "\u251C\u2500");   // |-
-        }
-        else if (last&(0x1<<(j+1))) printf("%s", "  ");
-            else printf("%s", "\u2502 ");  // |
-    }
-    if (!nd) { printf("NULL\n"); return; }
-    if (nd->count > 0) {
-        print_tag(ast, nd->tag);
-        printf("\n");
-        for (int i=0; i<nd->count; i++) {
-            if (i == nd->count-1) last = last|(0x1<<(inset+1));
-            print_tree(ast, nd->nodes[i], inset+1, last);
-        };
-        return;
-    }
-    // leaf node...
-    print_tag(ast, nd->tag);
-    char txt[50];
-    char* t = &txt[0];
-    t = node_quote(ast->src, nd, t, 49);
-    *t = '\0';       
-    printf(" %s\n", txt);
-}
-
-void print_ast(Peg* ast) {
-    if (ast && ast->tree) {
-        print_tree(ast, ast->tree, 0, 0);
-    } else {
-        printf("Empty AST...\n");
-    }
-}
-
-// -- fault report -----------------------------------------
-
-void fault_report(Peg* ast) {
-    printf("%s in rule: ", peg_err_msg[ast->err->err]);
-    print_tag(ast, ast->err->fail_rule);
-    printf("\n");
-    if (ast->err->expected) {
-        char open = ' ';
-        char close = ' ';
-        if (ast->err->expected->tag == SQ) { open = '\''; close = '\''; }
-        if (ast->err->expected->tag == CHS) { open = '['; close = ']'; }
-        printf("expected: %c", open);
-        print_text(ast->peg->src, ast->err->expected);
-        printf("%c\n", close);
-    }
-    printf("on line: ");
-    print_line_num(ast->src, ast->err->pos);
-    printf(" at: %d of %lu\n", ast->err->pos, strlen(ast->src));
-    print_cursor(ast->src, ast->err->pos);
-} 
-
-// -- Transform ---------------------------------------------
+// -- Transform x::y ---------------------------------------------
 
 void multi_transform(Env* pen, Node* parent) {
     for (int i=0; i<parent->count; i++) {
@@ -1103,29 +1219,17 @@ void multi_transform(Env* pen, Node* parent) {
     }
 }
 
-// == Bootstrap ======================================
-
-Peg* BOOT = NULL;
-
-// BOOT = { peg_grammar, boot_code(), NULL};
-void bootstrap() {
-    Peg* peg = (Peg *)malloc(sizeof(Peg));
-    if (!peg) panic("boot malloc..");
-    peg->src = peg_grammar;
-    peg->tree = boot_code();
-    peg->peg = NULL;
-    peg->err = NULL;
-    BOOT = peg;
-}
 
 // ==  Parser  ============================================
 
-void peg_print(Peg* peg);
-
-Peg peg_parser(Peg* peg, char* input, int start, int end, int flags) {
-    if (!peg) { // peg_compile(BOOT, ...)    TODO flags mask for raw+trace...
+Peg* peg_parser(Peg* peg, char* input, int start, int end, int flags) {
+    if (!peg) { // peg_compile(BOOT, ...)  TODO flags mask for raw+trace...
         if (!BOOT) bootstrap();
         peg = BOOT;
+    }
+    if (peg->err) {
+        fault_report(peg);
+        panic("grammar error...");
     }
     Env pen;
     pen.grammar = peg->src;
@@ -1151,60 +1255,104 @@ Peg peg_parser(Peg* peg, char* input, int start, int end, int flags) {
     if (pen.flags) printf("\n"); // end of debug trace
 
     if (result) {
-        Peg ast = {input, pen.results[0], peg, NULL};
+        Peg* new_peg = newPeg(input, pen.results[0], peg, NULL);
         if (pen.pos == pen.end) { // OK ...
             while (pen.multi) {
                 multi_transform(&pen, pen.results[0]);
             }
-            return ast;
+            return new_peg;
         }
-        ast.err = newErr(PEG_FELL_SHORT, pen.pos);
-        return ast;
+        new_peg->err = newErr(PEG_FELL_SHORT, pen.pos > pen.fail? pen.pos : pen.fail);
+        return new_peg;
     }
 
     Err* err = newErr(PEG_FAILED, pen.pos > pen.fail? pen.pos : pen.fail);
-    Peg ast = {input, NULL, peg, err};
     err->fail_rule = pen.fail_rule;
     err->expected = pen.expected;
+    Peg* bad_peg = newPeg(input, pen.results[0], peg, err);
 
-    return ast;
+    return bad_peg;
 }
 
 // ==  API  ============================================
 
-Peg peg_compile(char* grammar) {
+// returns a ptr to a parser for the grammar
+extern Peg* peg_compile(char* grammar) {
     return peg_parser(BOOT, grammar, 0, strlen(grammar), 0);
 }
 
-Peg peg_compile_text(char* grammar, int start, int end) {
-    return peg_parser(BOOT, grammar, start, end, 0);
-}
-
-Peg peg_compile_raw(char* grammar, int start, int end) {
-    return peg_parser(BOOT, grammar, start, end, 0);
-}
-
-Peg peg_parse(Peg* peg, char* input) {
+// parse input string using peg parser..
+extern Peg* peg_parse(Peg* peg, char* input) {
     return peg_parser(peg, input, 0, strlen(input), 0);
 }
 
-Peg peg_parse_text(Peg* peg, char* input, int start, int end) {
+// parse a slice of input from start to end..
+extern Peg* peg_parse_text(Peg* peg, char* input, int start, int end) {
     return peg_parser(peg, input, start, end, 0);
 }
 
-void peg_print(Peg* peg) {
+// display the parse tree or error report
+extern void peg_print(Peg* peg) {
     if (peg->err) fault_report(peg);
-    else print_ast(peg);
+    else print_ptree(peg);
 }
 
-bool peg_err(Peg* peg) {
+// true if the `peg` encountered an error
+extern bool peg_err(Peg* peg) {
     return peg->err? true : false;
 }
 
-Peg peg_trace(Peg* peg, char* input) {
+// print out a trace of the parse...
+extern Peg* peg_trace(Peg* peg, char* input) {
     return peg_parser(peg, input, 0, strlen(input), 2);
 }
 
-Peg peg_debug(Peg* peg, char* input) {
+// print out a low level trace of the parser instructions..
+extern Peg* peg_debug(Peg* peg, char* input) {
     return peg_parser(peg, input, 0, strlen(input), 1);
+}
+
+// Peg* access ..........
+
+
+// returns ptr to the parse tree root node..
+extern Node* peg_tree(Peg* peg) {
+    return peg->tree;
+}
+
+// copies node text span into `text` string arg, with a 0 end,
+// limit of max length, truncated if necessary.
+extern void peg_text(Peg* peg, Node* node, char* text, int max) {
+    int len = node->end - node->start;
+    int limit = len < max? len : max;
+    char* ptr = peg->src + node->start;
+    memcpy(text, ptr, limit);
+    *(text+limit) = '\0';    
+}
+
+// copies node rule name into `name` string arg, with a 0 end,
+// limit of max length, truncated if necessary.
+extern void peg_name(Peg* peg, Node* node, char* name, int max) {
+    Node* id = peg->peg->tree->nodes[node->tag]->nodes[0];
+    char* ptr = peg->peg->src + id->start;
+    int len = id->end - id->start;
+    int limit = len < max? len : max;
+    memcpy(name, ptr, limit);
+    *(name+limit) = '\0';
+}
+
+// Node* access ........
+
+
+// returns index of rule name
+extern int peg_tag(Node* node) {
+    return node->tag;
+}
+// returns count of children nodes
+extern int peg_count(Node* node) {
+    return node->count;
+}
+// returns ptr to the ith child node
+extern Node* peg_nodes(Node* node, int i) {
+    return node->nodes[i];
 }
