@@ -587,11 +587,11 @@ bool resolve_implicit(Node* exp, char* name, int len) {
             if (c == '-') { 
                 for (int j=i+1; j<len; j+=1) {
                     int c = (unsigned char)name[j];
-                    max = (max<<4) + c-(c>='0'&&c<='9'? '0' : 'A');
+                    max = (max<<4) + c-(c>='0'&&c<='9'? '0' : 55); // 'A'=65
                 }
                 break;
             };
-            min = (min<<4) + c-(c>='0'&&c<='9'? '0' : 'A');
+            min = (min<<4) + c-(c>='0'&&c<='9'? '0' : 55); // 'A'=65
         }
         if (max < min) max = min;
         return implicit_range(exp, min, max);
@@ -938,7 +938,7 @@ bool run(Env *pen, Node *exp) {
                     }
                     return false;                   
                 }
-                case: _EOF: { // !_ANY
+                case _EOF: { // !_ANY
                     if (pen->pos >= pen->end) return true;
                     return false;
                 }
