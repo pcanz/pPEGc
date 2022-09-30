@@ -22,7 +22,7 @@ char* peg_grammar =
 "    rep   = pre sfx? _                           \n"
 "    pre   = pfx? term                            \n"
 "    term  = call / quote / chars / group / extn  \n"
-"    group = '(' _ alt _ ')'                      \n"
+"    group = '('_ alt ')'                      \n"
 "                                                 \n"
 "    call  = at? id multi? _ !'='                 \n"
 "    at    = '@'                                  \n"
@@ -90,7 +90,9 @@ enum IMPLICIT {     // NOTE: these must match with implicit_names[]
 
 // -- parse tree node: slot for application data (used by parser) ------
 
-enum DATA_USE { NO_DATA, DATA_VALS, RANGE_DATA, BUILTIN, HEAP_DATA};
+enum DATA_USE { NO_DATA, 
+    DATA_VALS, RANGE_DATA, BUILTIN, 
+    HEAP_STR, HEAP_ARR};
 
 typedef union { 
     struct { // DATA_VALS, opx used for parser op code data...
@@ -105,9 +107,13 @@ typedef union {
     struct { // RANGE_DATA, implicit rule name UTF8 char range
         int min, max;
     } range;
-    struct { // HEAP_DATA, pointer for application data
-        void* p;
-    } ptr;
+    // HEAP_DATA, pointer for application data
+    struct { 
+        char *chars;
+    } str;
+    struct { 
+        int *ints;
+    } arr;
 } Slot;
 
 // -- parse tree node ------------------------------
@@ -149,8 +155,11 @@ static Node *newNode(int tag, int i, int j, int n) {
 };
 
 static void drop(Node* node) {
-    if (node->data_use == HEAP_DATA) {
-        free(node->data.ptr.p);
+    if (node->data_use == HEAP_STR) {
+        free(node->data.str.chars);
+    }
+    if (node->data_use == HEAP_ARR) {
+        free(node->data.arr.ints);
     }
     for (int i=0; i<node->count; i+=1) {
         drop(node->nodes[i]);
@@ -386,10 +395,10 @@ void print_ptree(Peg* peg) {
 
 void print_cursor(char* p, int pos) {
     int i = pos;
-    while ((unsigned char)p[i] >= ' ' && i > 0) i--;
+    while (i > 0 && p[i] != '\n' && p[i] != '\r') i--;
     if (i>0) i++; // after line break
     int j = pos;
-    while ((unsigned char)p[j] >= ' ') j++; // \n or \0
+    while (p[j] != 0 && p[j] != '\n' && p[j] != '\r') j++;
     for (int k=i; k<j; k++) printf("%c", p[k]);
     printf("\n");
     for (int k=i; k<pos; k++) {
@@ -539,18 +548,11 @@ int implicit_def(char* name) {
     return _NULL; // not defined as an implicit rule
 }
 
-// An implicit definition should never replace a valid implicit char code.
-// For example _FF should not be defined as the FF form-feed char code (0xC),
-// because it is a the intrinsic character code 0xFF. (_FORM-FEED would be OK)
-// To prevent such a bug from being introduced the implicit_rule() first checks
-// if the rule name is a valid char code, and only then checks if it is defined. 
-// Thus a bad definition trying to replace an intrinsic char will never work.
-
 int implicit_rule(char* name, int len) {
     if (name[0] != '_') return _NULL;
     if (len == 1) return implicit_def(name); // _UNDERSCORE
     bool range = false; // range example: _123-FFF 
-    for (int i=1; i<len; i+=1) { // validate as an intrinsic char...
+    for (int i=1; i<len; i+=1) { // validate as a char code...
         char c = name[i];        // [0-9A-F]+ ('-' [0-9A-F]+)?
         if ((c >= 'A' && c <= 'F') || (c>='0' && c<='9')) continue;
         if (c == '-') { // only one '-' 
@@ -558,9 +560,10 @@ int implicit_rule(char* name, int len) {
                 range = true; // with at least one digit either side..
                 continue;
             }
+        } else { // Not a char code ......
+            return implicit_def(name); // implicit definition or _NULL
         }
-        return implicit_def(name); // implicit definition or _NULL
-    }
+    } // rule name IS a char code  
     return _CHAR; // implicit character code 
 }
 
@@ -596,22 +599,21 @@ bool resolve_implicit(Node* exp, char* name, int len) {
         if (max < min) max = min;
         return implicit_range(exp, min, max);
     }
-    // if (imp == _WS) return implicit_range(exp, 0x9, 0x20); // => BUILTIN: _9-D / ' '
+    // if (imp == _WS) return implicit_range(exp, 0x9, 0x20); // => BUILTIN
     if (imp == _TAB) return implicit_range(exp, 0x9, 0x9);
     if (imp == _LF) return implicit_range(exp, 0xA, 0xA);
     if (imp == _CR) return implicit_range(exp, 0xD, 0xD);
-    if (imp == _BS) return implicit_range(exp, 0x5C, 0x5C);
+    if (imp == _BS) return implicit_range(exp, 0x5C, 0x5C); // back slash
     if (imp == _SQ) return implicit_range(exp, 0x27, 0x27);
     if (imp == _DQ) return implicit_range(exp, 0x22, 0x22);
     if (imp == _BT) return implicit_range(exp, 0x60, 0x60); // back tick `
     if (imp == _EOL) return implicit_range(exp, 0xA, 0xD);
     if (imp == _ANY) return implicit_range(exp, 0x0, 0x10FFFF);
     
-
-    if (imp == _EOF) return implicit_builtin(exp, _EOF);
-    if (imp == _NL) return implicit_builtin(exp, _NL);
-    if (imp == _WS) return implicit_builtin(exp, _WS);
-    if (imp == _UNDERSCORE) return implicit_builtin(exp, _UNDERSCORE);
+    if (imp == _EOF) return implicit_builtin(exp, _EOF); // _9-D / ' '
+    if (imp == _NL) return implicit_builtin(exp, _NL);   // _LF / _CR _LF?
+    if (imp == _WS) return implicit_builtin(exp, _WS);   // _9-D / ' '
+    if (imp == _UNDERSCORE) return implicit_builtin(exp, _UNDERSCORE); // _WS*
 
     return false; // undefined implicit rule name
 }
@@ -620,8 +622,7 @@ bool resolve_implicit(Node* exp, char* name, int len) {
 
 void resolve_id(Env* pen, Node* exp) {
     char name[50];
-    char* p = &name[0];
-    p = node_text(pen->grammar, exp, p, 49);
+    char *p = node_text(pen->grammar, exp, name, 50);
     *p = '\0';
     int len = p-name;
     for (int i=0; i<pen->tree->count; i++) {
@@ -686,6 +687,78 @@ void resolve_pre(Env* pen, Node* exp) {
     char sign = pen->grammar[pfx->start];
     exp->data.opx.sign = sign;
     exp->data_use = DATA_VALS;
+}
+
+int hex(int n, char *src) {
+    int code = 0;
+    for (int i=0; i<n; i++) {
+        char c = src[i];
+        if (c >= '0' && c <= '9') {
+            code = (code<<4) + (c-'0');
+        } else if (c >= 'A' && c <= 'F') {
+            code = (code<<4) + (c-'A') + 10;
+        } else if (c >= 'a' && c <= 'f') {
+            code = (code<<4) + (c-'a') + 10;
+        } else return 0;
+    }
+    return code;
+}
+
+int node_ints(Env* pen, Node* exp, int *out) {
+    int *start = out;
+    int len = exp->end - exp->start;
+    char *src = pen->grammar + exp->start;
+    for (int i=0; i<len; i++) { // copy UTF-8 bytes....
+        unsigned char c = src[i];
+        if (c == '\\' && i<len-1) {
+            unsigned char x = src[i+1];
+            int code = -1;
+            if (x == 't') code = 9;  // TAB
+            if (x == 'n') code = 10; // LF
+            if (x == 'r') code = 13; // CR
+            if (x == 'u' && i < len-5) code = hex(4, src+i+2);
+            if (x == 'U' && i < len-9) code = hex(8, src+i+2);
+            if (code == -1) { // no escape code
+                *out++ = '\\';
+            } else { // escape => code
+                int n = 1; // esc src len e.g. \n = 1
+                if (x == 'u') n = 5;
+                if (x == 'U') n = 9;
+                i += n; // skip over escape format
+                *out++ = code;
+            }
+        } else {
+            *out++ = c;
+        }
+    }
+    return out-start; // length
+}
+
+void resolve_sq(Env* pen, Node* exp) {
+    int codes[128];
+    int len = node_ints(pen, exp, codes);
+    char *str = malloc(len+1); // [0]=len
+    if (str == NULL) panic("malloc");
+    str[0] = len;
+    char *res = str+1;
+    for (int i=0; i<=len; i++) {
+        res += utf8_write(res, codes[i]); // res += utf8_size
+    }
+    exp->data.str.chars = str;
+    exp->data_use = HEAP_STR;
+}
+
+void resolve_chs(Env* pen, Node* exp) {
+    int codes[128];
+    int len = node_ints(pen, exp, codes);
+    int *vals = malloc(sizeof(int)*(len+1)); // [0]=len
+    if (vals == NULL) panic("malloc");
+    vals[0] = len;
+    for (int i=0; i<=len; i++) {
+        vals[i+1] = codes[i];
+    }
+    exp->data.arr.ints = vals;
+    exp->data_use = HEAP_ARR;
 }
 
 // == bootstrap peg_code constructors =================================
@@ -1063,59 +1136,52 @@ bool run(Env *pen, Node *exp) {
     }
     case SQ: { 
         if (pen->pos+exp->end-exp->start > pen->end) return false;
-        // TODO if raw && !resolved raw -> escaped string....
-        if (pen->grammar[exp->end+1] == 'i') { // 'xyz'i ASCII only..
-            for (int i=exp->start; i<exp->end; i+=1) {
-                unsigned char c1 = pen->input[pen->pos];
-                if (c1 >= 'a' && c1 <= 'z') c1 = c1-32;
-                unsigned char c2 = pen->grammar[i]; // TODO compile time..
-                if (c2 >= 'a' && c2 <= 'z') c2 = c2-32;
-                if (c1 != c2) return false;
-                pen->pos += 1;
+        if (exp->data_use == NO_DATA) resolve_sq(pen, exp);
+        unsigned char len = exp->data.str.chars[0];
+        if (pen->grammar[exp->end+1] != 'i') { // normal case sensitive...
+            for (int i=1; i<=len; i+=1) {
+                if (pen->input[pen->pos] != exp->data.str.chars[i]) return false;
+                pen->pos += 1; // any bytes, so UTF-8 ok
             }
             return true;
-        }
-        for (int i=exp->start; i<exp->end; i+=1) {
-            if (pen->input[pen->pos] != pen->grammar[i]) return false;
-            pen->pos += 1; // any bytes, so UTF-8 ok
+        } // 'xyz'i ASCII only case insensitive...  TODO Unicodes
+        for (int i=1; i<=len; i+=1) {
+            unsigned char c1 = pen->input[pen->pos];
+            if (c1 >= 'a' && c1 <= 'z') c1 = c1-32;
+            unsigned char c2 = exp->data.str.chars[i]; // TODO compile time..
+            if (c2 >= 'a' && c2 <= 'z') c2 = c2-32;
+            if (c1 != c2) return false;
+            pen->pos += 1;
         }
         return true;
     }
     case CHS: {
-        // TODO if raw && !resolved ....
-        if (pen->pos >= pen->end) return false;
+        if (pen->pos >= pen->end) return false;       
+        if (exp->data_use == NO_DATA) resolve_chs(pen, exp);
+        int len = exp->data.arr.ints[0];
         int c = (unsigned char)pen->input[pen->pos];
-        if (c > 127) c = utf8_read(pen->input);
-        int x_size = 1;
-        for (int i=exp->start; i<exp->end; i+=x_size) {
-            int x = (unsigned char)pen->grammar[i]; // TODO raw new escaped string
-            x_size = 1;
-            if (x > 127) {
-                x = utf8_read(pen->grammar+i); // TODO
-                x_size = utf8_size(x);
-            }
-            if (i+x_size+1 < exp->end && pen->grammar[i+x_size] == '-') {
-                int y = (unsigned char)pen->grammar[i+x_size+1]; // TODO
-                int y_size = 1;
-                if (y > 127) {
-                    y = utf8_read(pen->grammar+i); // TODO
-                    y_size = utf8_size(y);
-                }
-                i += 1+y_size; // skip range: "x-y"
-                if (c < x) continue;
-                if (c > y) continue;
-                pen->pos += x_size;
+        int n = 1; // char size
+        if (c > 127) {
+            c = utf8_read(pen->input);
+            n = utf8_size(c);
+        }
+        for (int i=1; i<=len; i++) { // 1..len
+            int code = exp->data.arr.ints[i];
+            if (i<len-1 && exp->data.arr.ints[i+1] == '-') {
+                int max = exp->data.arr.ints[i+2];
+                i += 2;
+                if (c < code || c > max) continue;
+                pen->pos += n;
                 return true;
-            } else if (x == c) {
-                pen->pos += x_size;
+            } else if (c == code) {
+                pen->pos += n;
                 return true;
             }
         }
         return false;
     }
     case CALL: { // at? id ("::" id)?
-        if (exp->count != 2) { // both operators:  @X::Y
-
+        if (exp->count != 2) { // both operators:  @X::Y  X >> Y
             printf("*** Not implemented: "); // TODO improve err reporting
             print_text(pen->grammar, exp);
             printf("\n");
@@ -1176,10 +1242,7 @@ bool run(Env *pen, Node *exp) {
                 return true;
             }
             default: { // TODO better err reporting...
-                // char msg[50];
-                // sprintf(msg, "woops: undefined op: %d\n", exp->tag);
-                // panic(msg);
-                printf("**** Undefined extn: ...\n");
+                printf("**** Undefined extn: ");
                 print_text(pen->grammar, exp);
                 printf("\n");
                 return false;
