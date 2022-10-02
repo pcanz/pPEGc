@@ -12,7 +12,7 @@ int main(void) {
     char* s2 = "s2 = [x]\n";
     test_ok(s2, "x");
 
-    char* s3 = "s3 = [«]\n";
+    char* s3 = "s3 = [«]\n"; 
     test_ok(s3, "«");
 
     char* s4 = "s4 = [«x»]+\n";

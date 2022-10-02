@@ -14,8 +14,6 @@ int main(void) {
     "day   = [0-9]*2                  \n";
     test_trace(date, "2022-03-04");
 
-
-
     printf("OK, misc tests done...\n");
 }
 
