@@ -26,29 +26,27 @@ char* peg_grammar =
 "                                                 \n"
 "    call  = at? id _ multi? !'='                 \n"
 "    at    = '@'                                  \n"
-"    multi = '->' _ id _                            \n"
+"    multi = '->' _ id _                          \n"
 "    id    = [a-zA-Z_] [a-zA-Z0-9_-]*             \n"
 "                                                 \n"
 "    pfx   = [~!&]                                \n"
 "    sfx   = [+?] / '*' range?                    \n"
-"    range = num ('..' num)?                      \n"
+"    range = num (dots num?)?                     \n"
 "    num   = [0-9]+                               \n"
+"    dots  = '..'                                 \n"
 "                                                 \n"
 "    quote = ['] sq ['] 'i'?                      \n"
 "    sq    = ~[']*                                \n"
 "    chars = '[' chs ']'                          \n"
 "    chs   =  ~']'*                               \n"
 "    extn  = '<' (id ' '*)* ~'>'* '>'             \n"
-"    _     = (_WS+ / '#' ~_EOL*)*                 \n";
-//   _WS   = [ \t\n\r]
-//   _EOL  = [\n\r]
-
+"    _     = ([ \t\n\r]+ / '#' ~[\n\r]*)*         \n";
 
 char *peg_names[] = { // used for the bootstrap rule_index
     "Peg", "rule",
     "alt", "seq", "rep", "pre", "term", "group",
     "call", "at", "multi",
-    "id", "pfx", "sfx", "range", "num",
+    "id", "pfx", "sfx", "range", "num", "dots",
     "quote", "sq", "chars", "chs", "extn", "_"
 };
 
@@ -64,7 +62,7 @@ enum op {
     PEG, RULE,
     ALT, SEQ, REP, PRE, TERM, GROUP,
     CALL, AT, MULTI,
-    ID, PFX, SFX, RANGE, NUM,
+    ID, PFX, SFX, RANGE, NUM, DOTS,
     QUOTE, SQ, CHARS, CHS, EXTN, WS
 };
 
@@ -620,6 +618,65 @@ bool resolve_implicit(Node* exp, char* name, int len) {
     return false; // undefined implicit rule name
 }
 
+// -- Implicit Rules ----------------------------------------------
+      
+bool implicit_code(Env *pen, Node *exp) { // implicit char rule name
+    if (pen->pos >= pen->end) return false;
+    int c = (unsigned char)pen->input[pen->pos];
+    int size = 1; // char bytes...
+    if (c > 127) {
+        c = utf8_read(pen->input);
+        size = utf8_size(c);
+    }
+    if (c < exp->data.range.min) return false;
+    if (c > exp->data.range.max) return false;
+    pen->pos += size;
+    return true;
+}
+
+bool builtin(Env *pen, Node *exp) { // implicit rule...
+    switch (exp->data.opx.builtin) {
+        case _WS: { // _WS = _9-D / ' '
+            if (pen->pos >= pen->end) return false;
+            char c = pen->input[pen->pos];
+            if (c == 0x20 || (c <= 0xD && c>= 0x9)) {
+                pen->pos++;
+                return true;
+            }
+            return false;              
+        }
+        case _UNDERSCORE: { // _ = _WS*
+            while (pen->pos < pen->end) {
+                char c = pen->input[pen->pos];
+                if (c == 0x20 || (c <= 0xD && c>= 0x9)) {
+                    pen->pos++;
+                } else break;
+            }
+            return true;
+        }
+        case _NL: { // _NL = _LF / CR LF?
+            if (pen->pos >= pen->end) return false;
+            char c = pen->input[pen->pos];
+            if (c=='\n') {
+                pen->pos++;
+                return true;
+            }
+            if (c=='\r') {
+                pen->pos++;
+                if (pen->input[pen->pos] == '\n') pen->pos++;
+                return true;                       
+            }
+            return false;                   
+        }
+        case _EOF: { // !_ANY
+            if (pen->pos >= pen->end) return true;
+            return false;
+        }
+        default: panic("undefined builtin...");
+    }
+    return false;
+}
+
 // -- resolve opx data slot extensions -------------------
 
 void resolve_id(Env* pen, Node* exp) {
@@ -673,11 +730,14 @@ void resolve_rep(Env* pen, Node* exp) {
     } else if (sfx->tag == NUM) {
         min = rep_num(pen->grammar, sfx->start, sfx->end);
         max = min;
-    } else if (sfx->tag == RANGE) {
+    } else if (sfx->tag == RANGE) { // range = num (dots num?)?
         Node* num1 = sfx->nodes[0];
         min = rep_num(pen->grammar, num1->start, num1->end);
-        Node* num2 = sfx->nodes[1];
-        max = rep_num(pen->grammar, num2->start, num2->end);
+        max = 0; // *Min..
+        if (sfx->count == 3) { // *Min..Max
+            Node* num2 = sfx->nodes[2];
+            max = rep_num(pen->grammar, num2->start, num2->end);
+        }
     } else panic("woops..");
     exp->data.opx.min = min;
     exp->data.opx.max = max;
@@ -710,9 +770,13 @@ int node_ints(Env* pen, Node* exp, int *out) {
     int *start = out;
     int len = exp->end - exp->start;
     char *src = pen->grammar + exp->start;
-    for (int i=0; i<len; i++) { // copy UTF-8 bytes....
+    for (int i=0; i<len; i++) {
         unsigned char c = src[i];
-        if (c == '\\' && i<len-1) {
+        if (c>127) {
+            int code = utf8_read(src+i);
+            i += utf8_size(code)-1;
+            *out++ = code;
+        } else if (c == '\\' && i<len-1) {
             unsigned char x = src[i+1];
             int code = -1;
             if (x == 't') code = 9;  // TAB
@@ -741,11 +805,11 @@ void resolve_sq(Env* pen, Node* exp) {
     int len = node_ints(pen, exp, codes);
     char *str = malloc(len+1); // [0]=len
     if (str == NULL) panic("malloc");
-    str[0] = len;
     char *res = str+1;
     for (int i=0; i<len; i++) {
         res += utf8_write(res, codes[i]); // res += utf8_size
     }
+    str[0] = (res-str)-1;
     exp->data.str.chars = str;
     exp->data_use = HEAP_STR;
 }
@@ -763,18 +827,16 @@ void resolve_chs(Env* pen, Node* exp) {
     exp->data_use = HEAP_ARR;
 }
 
+// --- Resolve extensions ------------------------------------------------
+
 char *extn_names[] = {
-    "do", "id", "eq", "lt", "gt", "le", "ge"
+    "union", "id",  "eq", "lt", "gt", "le", "ge"
 };
 
 enum extn_tag {
-    EXT_do, EXT_id,
+    EXT_union, EXT_id,
     EXT_eq, EXT_lt, EXT_gt, EXT_le, EXT_ge
 };
-
-bool ext_do(Env *, Node *); // <do id1 id2>
-bool ext_do_ids(Env *, Node *, Node *); // id1 -> id2
-bool ext_compare(Env *, Node* , int);
 
 void resolve_extn(Env* pen, Node* exp) {
     int tag = -1; // EXT_undefined
@@ -801,6 +863,95 @@ void resolve_extn(Env* pen, Node* exp) {
     }
     exp->data.opx.idx = tag;
     exp->data_use = DATA_VALS;
+}
+
+// -- Extension ops -------------------------------------------------
+
+bool run(Env *, Node *); // extensions call parser machine
+
+bool ext_union_ids(Env *pen, Node *id1, Node *id2) { // id1 -> id2
+    int stack = pen->stack;
+    bool result = run(pen, id1);
+    if (result && pen->stack > stack) {
+        pen->multi++;
+        Node* node = pen->results[stack];
+        node->data_use = DATA_VALS;
+        node->data.opx.is_multi = 1;
+        node->data.opx.multi = id2->data.opx.idx;
+    }
+    return result;
+}
+
+bool ext_union(Env* pen, Node* exp) { // <union x y>
+    if (exp->count != 3) return false;
+    return ext_union_ids(pen, exp->nodes[1], exp->nodes[2]);
+}
+
+Node *find_prior(Env *pen, int tag) {    
+    int k = pen->stack;
+    while (k-- > 0) { // seach prior parse tree sibling nodes...
+        Node* node = pen->results[k];
+        if (node->tag == tag) return node;
+    }
+    return NULL;
+}
+
+bool ext_compare(Env* pen, Node* exp, int key) {
+    if (exp->count < 2) return false;
+    Node *id = exp->nodes[1];
+    int tag = id->data.opx.idx;
+    Node *prior = find_prior(pen, tag);
+    int len = 0; // prior match length
+    if (prior != NULL) len = prior->end-prior->start;           
+    int start = pen->pos;
+    int stack = pen->stack;
+    bool result = run(pen, id);
+    if (!result) return false;
+    if (pen->stack > stack) { // delete nodes...
+        for (int i=stack; i<stack; i++) {
+            drop(pen->results[i]);
+        }
+        pen->stack = stack;
+    }
+    int size = pen->pos - start;
+    if (key == EXT_eq) return size == len;
+    if (key == EXT_lt) return size < len;
+    if (key == EXT_gt) return size > len;
+    if (key == EXT_le) return size <= len;
+    if (key == EXT_ge) return size >= len;
+    if (key ==  EXT_id) {
+        if (size != len) return false;
+        for (int i=0; i<len; i++) {
+            int pos = prior->start; // len > 0
+            if (pen->input[start+i] != pen->input[pos+i]) return false;
+        }
+        return true;
+    }
+    printf("woops, ext_compare key=%d\n", key);
+    return false;
+}
+
+// -- Transform X -> Y ---------------------------------------------
+
+void multi_transform(Env* pen, Node* parent) {
+    for (int i=0; i<parent->count; i++) {
+        Node* node = parent->nodes[i]; 
+        if (node->data_use == DATA_VALS && node->data.opx.is_multi) {
+            int tag = node->data.opx.multi;
+            pen->multi--;
+            pen->pos = node->start;
+            pen->end = node->end;
+            Node* rule = pen->tree->nodes[tag]->nodes[0];
+            int stack = pen->stack;
+            bool result = run(pen, rule);
+            if (result && pen->pos == node->end) {
+                drop(parent->nodes[i]);
+                parent->nodes[i] = pen->results[stack--];
+            }
+        } else {
+            multi_transform(pen, node);
+        }
+    }
 }
 
 // == bootstrap peg_code constructors =================================
@@ -892,7 +1043,7 @@ Node *opPRE(char* pfx, Node* opx) {
 // -- bootstrap peg grammar parse tree --------------------
 
 Node *boot_code() {
-    return ops(PEG, 22,
+    return ops(PEG, 23,
     //   Peg   = _ (rule _)+
     ops(RULE, 2, op(ID, "Peg"),
         ops(SEQ, 2, op(ID, "_"),
@@ -951,12 +1102,15 @@ Node *boot_code() {
         ops(ALT, 2, op(CHS, "+?"),
             ops(SEQ, 2, op(SQ, "*"),
                 opREP(op(ID, "range"), "?")))),
-    // range = num ('..' num)?
+    // range = num (dots num?)?
     ops(RULE, 2, op(ID, "range"),
         ops(SEQ, 2, op(ID, "num"),
-            opREP(ops(SEQ, 2, op(SQ, ".."), op(ID, "num")), "?"))),
+            opREP(ops(SEQ, 2, op(ID, "dots"),
+                    opREP(op(ID, "num"), "?")), "?"))),
     // num = [0-9]+
     ops(RULE, 2, op(ID, "num"), opREP(op(CHS, "0-9"), "+")),
+    // dots = '..'
+    ops(RULE, 2, op(ID, "dots"), op(SQ, "..")),
 
     //   quote = ['] sq ['] 'i'?
     ops(RULE, 2, op(ID, "quote"),
@@ -1008,67 +1162,14 @@ bool run(Env *pen, Node *exp) {
     switch (exp->tag) {
     case ID: {
         if (exp->data_use == NO_DATA) resolve_id(pen, exp);
-        if (exp->data_use == RANGE_DATA) { // implicit char rule name
-            if (pen->pos >= pen->end) return false;
-            int size = 1; // char bytes...
-            int c = (unsigned char)pen->input[pen->pos];
-            if (c > 127) {
-                c = utf8_read(pen->input);
-                size = utf8_size(c);
-            }
-            if (c < exp->data.range.min) return false;
-            if (c > exp->data.range.max) return false;
-            pen->pos += size;
-            return true;
-        }
-        if (exp->data_use == BUILTIN) { // implicit rule...
-            switch (exp->data.opx.builtin) {
-                case _WS: { // _WS = _9-D / ' '
-                    if (pen->pos >= pen->end) return false;
-                    char c = pen->input[pen->pos];
-                    if (c == 0x20 || (c <= 0xD && c>= 0x9)) {
-                        pen->pos++;
-                        return true;
-                    }
-                    return false;              
-                }
-                case _UNDERSCORE: { // _ = _WS*
-                    while (pen->pos < pen->end) {
-                        char c = pen->input[pen->pos];
-                        if (c == 0x20 || (c <= 0xD && c>= 0x9)) {
-                            pen->pos++;
-                        } else break;
-                    }
-                    return true;
-                }
-                case _NL: { // _NL = _LF / CR LF?
-                    if (pen->pos >= pen->end) return false;
-                    char c = pen->input[pen->pos];
-                    if (c=='\n') {
-                        pen->pos++;
-                        return true;
-                    }
-                    if (c=='\r') {
-                        pen->pos++;
-                        if (pen->input[pen->pos] == '\n') pen->pos++;
-                        return true;                       
-                    }
-                    return false;                   
-                }
-                case _EOF: { // !_ANY
-                    if (pen->pos >= pen->end) return true;
-                    return false;
-                }
-                default: panic("undefined builtin...");
-            }
-        }
+        if (exp->data_use == RANGE_DATA) return implicit_code(pen, exp);
+        if (exp->data_use == BUILTIN) return builtin(pen, exp);
         int tag = exp->data.opx.idx;
         int start = pen->pos;
         int stack = pen->stack;
         Node* rule = pen->tree->nodes[tag]->nodes[1];
         if (pen->flags == 2) rule_trace_open(pen, tag);
-        if (pen->depth++ > MAX_STACK)
-            panic("call recursion > MAX_STACK ....");
+        if (pen->depth++ > MAX_STACK) panic("call recursion > MAX_STACK ....");
         bool result = run(pen, rule);
         pen->depth--;
         if (pen->flags == 2) rule_trace_close(pen, tag, result);
@@ -1206,7 +1307,7 @@ bool run(Env *pen, Node *exp) {
         int c = (unsigned char)pen->input[pen->pos];
         int n = 1; // char size
         if (c > 127) {
-            c = utf8_read(pen->input);
+            c = utf8_read(pen->input+pen->pos);
             n = utf8_size(c);
         }
         for (int i=1; i<=len; i++) { // 1..len
@@ -1235,7 +1336,7 @@ bool run(Env *pen, Node *exp) {
             if (id1->data_use == NO_DATA) resolve_id(pen, id1);
             Node* id2 = exp->nodes[1];
             if (id2->data_use == NO_DATA) resolve_id(pen, id2);
-            return ext_do_ids(pen, id1, id2);
+            return ext_union_ids(pen, id1, id2);
         }
         printf("*** Not implemented: "); // TODO improve err reporting
         print_text(pen->grammar, exp);
@@ -1243,17 +1344,13 @@ bool run(Env *pen, Node *exp) {
         return false;
     }
     case EXTN: {
-        if (pen->pos >= pen->end) return false;       
         if (exp->data_use == NO_DATA) resolve_extn(pen, exp);
         int tag = exp->data.opx.idx;
         switch (tag) {
-            case EXT_do: return ext_do(pen, exp);
-            case EXT_id: return ext_compare(pen, exp, EXT_id);
-            case EXT_eq: return ext_compare(pen, exp, EXT_eq);
-            case EXT_lt: return ext_compare(pen, exp, EXT_lt);
-            case EXT_gt: return ext_compare(pen, exp, EXT_gt);
-            case EXT_le: return ext_compare(pen, exp, EXT_le);
-            case EXT_ge: return ext_compare(pen, exp, EXT_ge);
+            case EXT_union: return ext_union(pen, exp);
+            case EXT_id: case EXT_eq: 
+            case EXT_lt: case EXT_gt: case EXT_le: case EXT_ge:
+                return ext_compare(pen, exp, tag);
             default: { // TODO better err reporting...
                 printf("**** Undefined extn: ");
                 print_text(pen->grammar, exp);
@@ -1261,9 +1358,8 @@ bool run(Env *pen, Node *exp) {
                 return false;
             }
         }
-        return false;        
-    }
-
+        return false;     
+    }   
     default: {
         char msg[50];
         sprintf(msg, "woops: undefined op: %d\n", exp->tag);
@@ -1273,97 +1369,11 @@ bool run(Env *pen, Node *exp) {
     } // switch
 } // run
 
-// -- Extensions -------------------------------------------------
-
-bool ext_do(Env* pen, Node* exp) { // <do x y>
-    if (exp->count != 3) return false;
-    return ext_do_ids(pen, exp->nodes[1], exp->nodes[2]);
-}
-
-bool ext_do_ids(Env *pen, Node *id1, Node *id2) { // id1 -> id2
-    int stack = pen->stack;
-    bool result = run(pen, id1);
-    if (result && pen->stack > stack) {
-        pen->multi++;
-        Node* node = pen->results[stack];
-        node->data_use = DATA_VALS;
-        node->data.opx.is_multi = 1;
-        node->data.opx.multi = id2->data.opx.idx;
-    }
-    return result;
-}
-
-Node *find_prior(Env *pen, int tag) {    
-    int k = pen->stack;
-    while (k-- > 0) { // seach prior parse tree sibling nodes...
-        Node* node = pen->results[k];
-        if (node->tag == tag) return node;
-    }
-    return NULL;
-}
-
-bool ext_compare(Env* pen, Node* exp, int key) {
-    if (exp->count < 2) return false;
-    Node *id = exp->nodes[1];
-    int tag = id->data.opx.idx;
-    Node *prior = find_prior(pen, tag);
-    int len = 0; // prior match length
-    if (prior != NULL) len = prior->end-prior->start;           
-    int start = pen->pos;
-    int stack = pen->stack;
-    bool result = run(pen, id);
-    if (!result) return false;
-    if (pen->stack > stack) { // delete nodes...
-        for (int i=stack; i<stack; i++) {
-            drop(pen->results[i]);
-        }
-        pen->stack = stack;
-    }
-    int size = pen->pos - start;
-    if (key == EXT_eq) return size == len? true : false;
-    if (key == EXT_lt) return size < len? true : false;
-    if (key == EXT_gt) return size > len? true : false;
-    if (key == EXT_le) return size <= len? true : false;
-    if (key == EXT_ge) return size >= len? true : false;
-    if (key ==  EXT_id) {
-        if (size != len) return false;
-        for (int i=0; i<len; i++) {
-            int pos = prior->start; // len > 0
-            if (pen->input[start+i] != pen->input[pos+i]) return false;
-        }
-        return true;
-    }
-    printf("woops, ext_compare key=%d\n", key);
-    return false;
-}
-
-// -- Transform X -> Y ---------------------------------------------
-
-void multi_transform(Env* pen, Node* parent) {
-    for (int i=0; i<parent->count; i++) {
-        Node* node = parent->nodes[i]; 
-        if (node->data_use == DATA_VALS && node->data.opx.is_multi) {
-            int tag = node->data.opx.multi;
-            pen->multi--;
-            pen->pos = node->start;
-            pen->end = node->end;
-            Node* rule = pen->tree->nodes[tag]->nodes[0];
-            int stack = pen->stack;
-            bool result = run(pen, rule);
-            if (result && pen->pos == node->end) {
-                drop(parent->nodes[i]);
-                parent->nodes[i] = pen->results[stack--];
-            }
-        } else {
-            multi_transform(pen, node);
-        }
-    }
-}
 
 // ==  Parser  ============================================
 
 Peg* peg_parser(Peg* peg, char* input, int start, int end, int flags) {
-    if (!peg) { // peg_compile(BOOT, ...)  TODO flags mask for raw+trace...
+    if (!peg) { // peg_compile(BOOT, ...)
         if (!BOOT) bootstrap();
         peg = BOOT;
     }
@@ -1459,7 +1469,6 @@ extern Peg* peg_debug(Peg* peg, char* input) {
 
 // Peg* access ..........
 
-
 // returns ptr to the parse tree root node..
 extern Node* peg_tree(Peg* peg) {
     return peg->tree;
@@ -1485,9 +1494,6 @@ extern void peg_name(Peg* peg, Node* node, char* name, int max) {
     memcpy(name, ptr, limit);
     *(name+limit) = '\0';
 }
-
-// Node* access ........
-
 
 // returns index of rule name
 extern int peg_tag(Node* node) {
