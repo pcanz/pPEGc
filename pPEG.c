@@ -743,7 +743,7 @@ void resolve_sq(Env* pen, Node* exp) {
     if (str == NULL) panic("malloc");
     str[0] = len;
     char *res = str+1;
-    for (int i=0; i<=len; i++) {
+    for (int i=0; i<len; i++) {
         res += utf8_write(res, codes[i]); // res += utf8_size
     }
     exp->data.str.chars = str;
@@ -1179,9 +1179,9 @@ bool run(Env *pen, Node *exp) {
         return result;
     }
     case SQ: { 
-        if (pen->pos+exp->end-exp->start > pen->end) return false;
         if (exp->data_use == NO_DATA) resolve_sq(pen, exp);
         unsigned char len = exp->data.str.chars[0];
+        if (pen->pos+len > pen->end) return false;
         if (pen->grammar[exp->end+1] != 'i') { // normal case sensitive...
             for (int i=1; i<=len; i+=1) {
                 if (pen->input[pen->pos] != exp->data.str.chars[i]) return false;
@@ -1200,7 +1200,7 @@ bool run(Env *pen, Node *exp) {
         return true;
     }
     case CHS: {
-        if (pen->pos >= pen->end) return false;       
+        if (pen->pos >= pen->end) return false;
         if (exp->data_use == NO_DATA) resolve_chs(pen, exp);
         int len = exp->data.arr.ints[0];
         int c = (unsigned char)pen->input[pen->pos];
@@ -1310,9 +1310,16 @@ bool ext_compare(Env* pen, Node* exp, int key) {
     int len = 0; // prior match length
     if (prior != NULL) len = prior->end-prior->start;           
     int start = pen->pos;
+    int stack = pen->stack;
     bool result = run(pen, id);
     if (!result) return false;
-    int size = pen->pos-start;
+    if (pen->stack > stack) { // delete nodes...
+        for (int i=stack; i<stack; i++) {
+            drop(pen->results[i]);
+        }
+        pen->stack = stack;
+    }
+    int size = pen->pos - start;
     if (key == EXT_eq) return size == len? true : false;
     if (key == EXT_lt) return size < len? true : false;
     if (key == EXT_gt) return size > len? true : false;
@@ -1412,6 +1419,11 @@ Peg* peg_parser(Peg* peg, char* input, int start, int end, int flags) {
 // returns a ptr to a parser for the grammar
 extern Peg* peg_compile(char* grammar) {
     return peg_parser(BOOT, grammar, 0, strlen(grammar), 0);
+}
+
+// comiple text from start to end, returns a ptr to a parser
+extern Peg* peg_compile_text(char* grammar, int start, int end) {
+    return peg_parser(BOOT, grammar, start, end, 0);
 }
 
 // parse input string using peg parser..
