@@ -1,0 +1,198 @@
+#   Basic Tests
+
+Options:
+>   use: ...   # compile and use grammar
+>   peg: ...   # compile, show parse tree, and use 
+>   match: ... # parse and only show errors
+>   not: ...   # parse and report an error if it matches
+>   parse: ... # parse and show parse tree
+
+use: s = 'x'
+match: x
+use: s = 'x' 'y'
+match: xy
+use: s = 'xyz'
+match: xyz
+use: s = ''
+match:
+use: s = 'x' '' 'y'
+match: xy
+
+use: s = 'x'/'y'
+match: x
+match: y
+use: s = 'x'/'y'/'z'
+match: x
+match: y
+match: z
+
+use: s = ('x'/'y')*
+match:
+match: x
+match: y
+match: xy
+match: xyxyxyyyxx
+use: s = ('x'/'y'/'z')*
+match:
+match: y
+match: xyz
+match: yxz
+match: zzzxxyxzz
+
+use: s = 'x' 'y'? 'z'
+match: xyz
+match: xz
+use: s = 'x' 'y'+ 'z'
+match: xyz
+match: xyyyz
+use: s = ('x'/'y'/'z')+
+match: y
+match: xyyz
+match: yxz
+match: zzzxxyxzz
+
+use: s = [x]
+match: x
+use: s = [x]*
+match:
+match: x
+match: xxxxx
+use: s = [xyz]*
+match:
+match: x
+match: zzxxyzyx
+use: s = [x-z]*
+match:
+match: x
+match: y
+match: z
+match: zzxxyzyx
+
+use: s = p q   p = 'x'  q = 'y'
+match: xy
+use: s = p q   p = 'x'  q = 'y' s*
+match: xy
+match: xyxyxy
+
+use: s = 'x' !'y' 'z' / 'xy' 'z'
+match: xz
+match: xyz
+use: s = 'x' &[x-z] [a-z]+ / 'x' [0-9] [x-z]
+match: xyz
+match: xyabcz
+match: x9z
+not: x0a
+use: s = ~[x-z]
+match: a
+not: y
+use: s = []
+not:
+use: s = ~[]
+match: x
+use: s = !(~[])
+match:
+
+use: s = 'x' '\t' 'y'
+match: x	y
+not: x\ty
+use: s = 'x' '\u0009' 'y'
+match: x	y
+use: s = 'x' '\U00000009' 'y'
+match: x	y
+not: x\ty
+use: s = 'x' [\u0009] 'y'
+match: x	y
+not: x\ty
+use: s = 'x' [ \t\n\r]* 'y'
+match: x
+	y
+use: s = 'x' ('\n'/'\r' '\n'?) [ \t]* 'y'
+match: x
+	y
+use: s = 'x' [\u0009-\u005A]* 'y'
+match: x	   ABCy
+
+use: s = 'x'*3
+not: xx
+match: xxx
+not: xxxx
+use: s = 'x'*3..5
+not: xx
+match: xxx
+match: xxxx
+match: xxxxx
+not: xxxxxx
+use: s = 'x'*3..
+not: xx
+match: xxx
+match: xxxx
+match: xxxxxxx
+
+use: s = '«'
+match: «
+use: s = 'x«»x«'
+match: x«»x«
+use: s = [«]
+match: «
+use: s = [x«y»]+
+match: y»x«
+
+
+use:
+	# comment ....
+    Peg   = _ rule+ _  # comment ..                          
+    rule  = id _ '=' _ alt                       
+                                                 
+    alt   = seq ('/'_ seq)*                      
+    seq   = rep*                                 
+    rep   = pre sfx? _                           
+    pre   = pfx? term                            
+    term  = call / quote / chars / group / extn  
+    group = '('_ alt ')'                         
+                                                 
+    call  = id _ !'='                 
+    id    = [a-zA-Z_] [a-zA-Z0-9_-]*             
+                                                 
+    pfx   = [~!&]                                
+    sfx   = [+?] / '*' range?                    
+    range = num (dots num?)?                      
+    num   = [0-9]+
+	dots  = '..'  # comment ..                             
+    # comment ..                                             
+    quote = ['] sq ['] 'i'?                      
+    sq    = ~[']*                                
+    chars = '[' chs ']'                          
+    chs   =  ~']'*                               
+    extn  = '<' ~'>'* '>'                        
+    _     = ([ \t\n\r]+ / '#' ~[\n\r]*)*
+	# comment..
+
+match:
+    Peg   = _ rule+ _                            
+    rule  = id _ '=' _ alt                       
+                                                 
+    alt   = seq ('/'_ seq)*                      
+    seq   = rep*                                 
+    rep   = pre sfx? _                           
+    pre   = pfx? term                            
+    term  = call / quote / chars / group / extn  
+    group = '('_ alt ')'                         
+                                                 
+    call  = at? id multi? _ !'='                 
+    at    = '@'                                  
+    multi = '::' id                              
+    id    = [a-zA-Z_] [a-zA-Z0-9_-]*             
+                                                 
+    pfx   = [~!&]                                
+    sfx   = [+?] / '*' range?                    
+    range = num (dots num?)?                      
+    num   = [0-9]+
+	dots  = '..'                               
+                                                 
+    quote = ['] sq ['] 'i'?                      
+    sq    = ~[']*                                
+    chars = '[' chs ']'                          
+    chs   =  ~']'*                               
+    extn  = '<' ~'>'* '>'
+	_     = ([ \t\n\r]+ / '#' ~[\n\r]*)*
+                        
