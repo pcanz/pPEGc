@@ -128,6 +128,11 @@ match: xxx
 match: xxxx
 match: xxxxxxx
 
+use: s = 'abc'i
+match: abc
+match: aBc
+match: ABC
+
 use: s = '«'
 match: «
 use: s = 'x«»x«'

@@ -42,6 +42,8 @@ char* peg_grammar =
 "    extn  = '<' (id ' '*)* ~'>'* '>'             \n"
 "    _     = ([ \t\n\r]+ / '#' ~[\n\r]*)*         \n";
 
+// This grammar must agree with the bootstrap grammar.
+
 char *peg_names[] = { // used for the bootstrap rule_index
     "Peg", "rule",
     "alt", "seq", "rep", "pre", "term", "group",
@@ -830,11 +832,11 @@ void resolve_chs(Env* pen, Node* exp) {
 // --- Resolve extensions ------------------------------------------------
 
 char *extn_names[] = {
-    "union", "id",  "eq", "lt", "gt", "le", "ge"
+    "and", "id",  "eq", "lt", "gt", "le", "ge"
 };
 
 enum extn_tag {
-    EXT_union, EXT_id,
+    EXT_and, EXT_id,
     EXT_eq, EXT_lt, EXT_gt, EXT_le, EXT_ge
 };
 
@@ -869,10 +871,18 @@ void resolve_extn(Env* pen, Node* exp) {
 
 bool run(Env *, Node *); // extensions call parser machine
 
-bool ext_union_ids(Env *pen, Node *id1, Node *id2) { // id1 -> id2
+bool ext_and_ids(Env *pen, Node *id1, Node *id2) { // id1 -> id2
+    int start = pen->pos;
     int stack = pen->stack;
     bool result = run(pen, id1);
     if (result && pen->stack > stack) {
+        if (pen->pos == start) { // empty match
+            for (int i=stack; i<stack; i++) {
+                drop(pen->results[i]);
+            }
+            pen->stack = stack;            
+            return true; // TODO think about this, is it always correct? 
+        }
         pen->multi++;
         Node* node = pen->results[stack];
         node->data_use = DATA_VALS;
@@ -882,9 +892,9 @@ bool ext_union_ids(Env *pen, Node *id1, Node *id2) { // id1 -> id2
     return result;
 }
 
-bool ext_union(Env* pen, Node* exp) { // <union x y>
+bool ext_and(Env* pen, Node* exp) { // <and x y>
     if (exp->count != 3) return false;
-    return ext_union_ids(pen, exp->nodes[1], exp->nodes[2]);
+    return ext_and_ids(pen, exp->nodes[1], exp->nodes[2]);
 }
 
 Node *find_prior(Env *pen, int tag) {    
@@ -907,18 +917,7 @@ bool ext_compare(Env* pen, Node* exp, int key) {
     int stack = pen->stack;
     bool result = run(pen, id);
     if (!result) return false;
-    if (pen->stack > stack) { // delete nodes...
-        for (int i=stack; i<stack; i++) {
-            drop(pen->results[i]);
-        }
-        pen->stack = stack;
-    }
     int size = pen->pos - start;
-    if (key == EXT_eq) return size == len;
-    if (key == EXT_lt) return size < len;
-    if (key == EXT_gt) return size > len;
-    if (key == EXT_le) return size <= len;
-    if (key == EXT_ge) return size >= len;
     if (key ==  EXT_id) {
         if (size != len) return false;
         for (int i=0; i<len; i++) {
@@ -927,6 +926,17 @@ bool ext_compare(Env* pen, Node* exp, int key) {
         }
         return true;
     }
+    if (pen->stack > stack) { // delete nodes...
+        for (int i=stack; i<stack; i++) {
+            drop(pen->results[i]);
+        }
+        pen->stack = stack;
+    }
+    if (key == EXT_eq) return size == len;
+    if (key == EXT_lt) return size < len;
+    if (key == EXT_gt) return size > len;
+    if (key == EXT_le) return size <= len;
+    if (key == EXT_ge) return size >= len;
     printf("woops, ext_compare key=%d\n", key);
     return false;
 }
@@ -1132,11 +1142,11 @@ Node *boot_code() {
                     opREP(op(SQ, " "), "*")), "*"),
             opREP(opPRE("~", op(SQ, ">")), "*"),
             op(SQ, ">"))),                   
-    //   _  = (_WS+ / '#' ~_EOL*)*
+    //   _  = ([ \t\n\r]+ / '#' ~[\n\r]*)*
     ops(RULE, 2, op(ID, "_"),
-        opREP(ops(ALT, 2, opREP(op(ID, "_WS"), "+"),
+        opREP(ops(ALT, 2, opREP(op(CHS, " \t\n\r"), "+"),
             ops(SEQ, 2, op(SQ, "#"),
-                opREP(opPRE("~", op(ID, "_EOL")), "*"))), "*"))              
+                opREP(opPRE("~", op(CHS, "\n\r")), "*"))), "*"))              
     );
 }
 
@@ -1336,7 +1346,7 @@ bool run(Env *pen, Node *exp) {
             if (id1->data_use == NO_DATA) resolve_id(pen, id1);
             Node* id2 = exp->nodes[1];
             if (id2->data_use == NO_DATA) resolve_id(pen, id2);
-            return ext_union_ids(pen, id1, id2);
+            return ext_and_ids(pen, id1, id2);
         }
         printf("*** Not implemented: "); // TODO improve err reporting
         print_text(pen->grammar, exp);
@@ -1347,7 +1357,7 @@ bool run(Env *pen, Node *exp) {
         if (exp->data_use == NO_DATA) resolve_extn(pen, exp);
         int tag = exp->data.opx.idx;
         switch (tag) {
-            case EXT_union: return ext_union(pen, exp);
+            case EXT_and: return ext_and(pen, exp);
             case EXT_id: case EXT_eq: 
             case EXT_lt: case EXT_gt: case EXT_le: case EXT_ge:
                 return ext_compare(pen, exp, tag);
