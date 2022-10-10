@@ -62,6 +62,10 @@ int space(char *str, int pos) {
     return pos;
 }
 
+int not_blank(char *str, int pos) {
+    return str[pos+1] > ' ';
+}
+
 int line(char *str, int pos) {
     while (str[pos] != '\0') {
         char c = str[pos++];
@@ -81,9 +85,9 @@ int match(char *key, char *str, int pos) {
     return -1;
 }
 
-char *keys[] = { "peg:", "use:", "parse:", "match:", "not:", ""};
+char *keys[] = { "peg:", "use:", "parse:", "match:", "not:", "trace:", "debug:", ""};
 
-enum KeyTag { PEG, USE, PARSE, MATCH, NOT };
+enum KeyTag { PEG, USE, PARSE, MATCH, NOT, TRACE, DEBUG };
 
 int keytag = -1; // last key match
 
@@ -104,7 +108,7 @@ int key(char *str, int pos) {
 Peg* peg;
 
 void process(char *txt, int i, int j) {
-    while (txt[j-1] == '\n' || txt[j-1] == '\r') j--;
+    while (txt[j-1] == '\n' || txt[j-1] == '\r') j--; // trim last eol
 
     if (keytag == PEG) {
         peg = peg_compile_text(txt, i, j);
@@ -134,12 +138,21 @@ void process(char *txt, int i, int j) {
         }
     }
 
+    if (keytag == TRACE) {
+        Peg* p = peg_trace_text(peg, txt, i, j);
+        peg_print(p);
+    }    
+    if (keytag == DEBUG) {
+        Peg* p = peg_debug_text(peg, txt, i, j);
+        peg_print(p);
+    }    
+
 }
 
 // ========================================================
 
 int main(int argc, char *argv[]) {
-    printf("Hello pPEG test-run:\n");
+    printf("Hello pPEG run-tests:\n");
 
     for (int i=1; i<argc; i++) {
         char* txt = read_file(argv[i]);
@@ -154,7 +167,7 @@ int main(int argc, char *argv[]) {
                 int k = pos;
                 while (txt[k] != '\0') {
                     int l = space(txt, k);
-                    if (l-k <= inset) break;
+                    if (l-k <= inset && not_blank(txt, l)) break;
                     k = line(txt, l);
                 }
                 pos = k;

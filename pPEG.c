@@ -213,6 +213,7 @@ typedef struct {
     char* grammar;  // source text
     Node* tree;     // peg rules
     char* input;
+    int start;
     int pos;        // parser cursor
     int end;        // end of input string (or end of % span)
     int depth;      // rule call depth (catch recursion)
@@ -290,22 +291,21 @@ int utf8_write(char* p, int x) {
 
 // -- node utils ---------------------------------
 
-char* node_text(char* str, Node* nd, char* out, int len) { // TODO len count escapes!!!
-    if (len < 1) return out;
-    int span = nd->end - nd->start; // text len
-    int mid = len >> 1;
+char* node_txt(char* str, Node* nd, char* out, int len, int extra) { // extra for escape codes
+    char *out1 = out;
+    int start = nd->start;
     int end = nd->end;
-    int skip = end; // don't skip ... truncate to len if necessary
-    int rest = end; // not used unless skip ...
-    if (len < span+1) { // truncate or skip ... (allow for '\0' inside len)
-        if (len > 11) { // skip ...
-            skip = nd->start + mid - 3; // " ... " in approx middle
-            rest = nd->end - mid + 3 ;  // " ... " 5 chars + 1 for \0
-        } else { // truncate
-            end = nd->start+len-2;
-        }
+    int span = end - start; // text len
+    int chop = span + extra - len; // excess text 
+    if (chop > 0 && len < 13) { // 1234 ... 0123
+        printf("woops, node_text buffer too small....\n");
+        return out;
     }
-    for (int i = nd->start; i < end; i += 1) {
+    int mid = start + (len >> 1) - 4;
+    for (int i = start; i < end; i += 1) {
+        if (out-out1 > len-4) { // escapes have over-run length calculation..
+            return node_txt(str, nd, out1, len, extra+4); // try again..
+        }
         unsigned char c = str[i];
         if (c < ' ') {
             if (c == '\n') strcpy(out, "\\n");
@@ -320,13 +320,18 @@ char* node_text(char* str, Node* nd, char* out, int len) { // TODO len count esc
         }
         if (c == '"' || c == '\\') *out++ = '\\';
         *out++ = c;
-        if (i == skip) {
+        if (chop > 0 && i > mid) {
             strcpy(out, " ... ");
             out += 5;
-            i = rest; // skip to rest
+            i += chop; // skip excess
+            chop = -1;
         } 
     }
     return out;
+}
+
+char* node_text(char* str, Node* nd, char* out, int len) {
+    return node_txt(str, nd, out, len, 4); // init 4 extra chars for escape codes
 }
 
 // -- peg print display ---------------------------
@@ -378,9 +383,9 @@ void print_tree(Peg* peg, Node* nd, int inset, unsigned long long last) {
     }
     // leaf node...
     print_tag(peg, nd->tag);
-    char txt[50];
+    char txt[100];
     char* t = &txt[0];
-    t = node_quote(peg->src, nd, t, 49);
+    t = node_quote(peg->src, nd, t, 100);
     *t = '\0';       
     printf(" %s\n", txt);
 }
@@ -474,7 +479,7 @@ void show_exp(Env *pen, Node *exp, char* out, int len) {
 void debug_trace(Env *pen, Node* exp) {
     char c = pen->input[pen->pos];
     if (c == '\n') c = ' ';
-    printf("%d: %c\t", pen->pos, c);
+    printf("%d: %c\t", pen->pos - pen->start, c);
     char show[100];
     show_exp(pen, exp, show, 99);
     printf("%s\n", show);
@@ -682,8 +687,8 @@ bool builtin(Env *pen, Node *exp) { // implicit rule...
 // -- resolve opx data slot extensions -------------------
 
 void resolve_id(Env* pen, Node* exp) {
-    char name[50];
-    char *p = node_text(pen->grammar, exp, name, 50);
+    char name[100];
+    char *p = node_text(pen->grammar, exp, name, 100);
     *p = '\0';
     int len = p-name;
     for (int i=0; i<pen->tree->count; i++) {
@@ -871,6 +876,10 @@ void resolve_extn(Env* pen, Node* exp) {
 
 bool run(Env *, Node *); // extensions call parser machine
 
+// <cmd x y z ... >  resolved into:  exp = [extn [x, y, z ...]]
+
+// <and x y>  or experimental: x -> y
+
 bool ext_and_ids(Env *pen, Node *id1, Node *id2) { // id1 -> id2
     int start = pen->pos;
     int stack = pen->stack;
@@ -897,6 +906,11 @@ bool ext_and(Env* pen, Node* exp) { // <and x y>
     return ext_and_ids(pen, exp->nodes[1], exp->nodes[2]);
 }
 
+// -- Prior match ---------------------------
+// <id x> for an indentical match, even if x matched again could be different (eg x = ' '+  # larger)
+// <eq x> for same length match result (x is run again and result lenght compared to prior match).
+// length comparisons also need to delete their results, whereas id needs to create a result.
+
 Node *find_prior(Env *pen, int tag) {    
     int k = pen->stack;
     while (k-- > 0) { // seach prior parse tree sibling nodes...
@@ -904,6 +918,25 @@ Node *find_prior(Env *pen, int tag) {
         if (node->tag == tag) return node;
     }
     return NULL;
+}
+
+bool ext_id(Env* pen, Node *id) { // <id x>  and @id
+    int tag = id->data.opx.idx;
+    Node *prior = find_prior(pen, tag);
+    int len = 0; // prior match length
+    if (prior != NULL) len = prior->end-prior->start;
+    int size = prior->end - prior->start;
+    int start = pen->pos;
+    if (start+size > pen->end) return false;
+    for (int i=0; i<len; i++) {
+        if (pen->input[start+i] != pen->input[prior->start+i]) return false;
+    }
+    if (len == 0) return true;
+    pen->pos += len;
+    return true; // TODO should a node be created?
+    // Node *nd = newNode(tag, start, pen->pos, 0);
+    // pen->results[pen->stack++] = nd;
+    // return true;
 }
 
 bool ext_compare(Env* pen, Node* exp, int key) {
@@ -918,14 +951,6 @@ bool ext_compare(Env* pen, Node* exp, int key) {
     bool result = run(pen, id);
     if (!result) return false;
     int size = pen->pos - start;
-    if (key ==  EXT_id) {
-        if (size != len) return false;
-        for (int i=0; i<len; i++) {
-            int pos = prior->start; // len > 0
-            if (pen->input[start+i] != pen->input[pos+i]) return false;
-        }
-        return true;
-    }
     if (pen->stack > stack) { // delete nodes...
         for (int i=stack; i<stack; i++) {
             drop(pen->results[i]);
@@ -1337,9 +1362,7 @@ bool run(Env *pen, Node *exp) {
     }
     case CALL: { // call = at? id _ ("->" id _)?
         if (exp->count == 2 && exp->nodes[0]->tag == AT) { // @id
-            Node* id = exp->nodes[1];
-            if (id->data_use == NO_DATA) resolve_id(pen, id);
-            return ext_compare(pen, exp, EXT_id);
+            return ext_id(pen, exp->nodes[1]);
         }
         if (exp->count == 2 && exp->nodes[0]->tag == ID) { // id1 -> id2
             Node* id1 = exp->nodes[0];
@@ -1357,9 +1380,14 @@ bool run(Env *pen, Node *exp) {
         if (exp->data_use == NO_DATA) resolve_extn(pen, exp);
         int tag = exp->data.opx.idx;
         switch (tag) {
-            case EXT_and: return ext_and(pen, exp);
-            case EXT_id: case EXT_eq: 
-            case EXT_lt: case EXT_gt: case EXT_le: case EXT_ge:
+            case EXT_and:
+                return ext_and(pen, exp);
+            case EXT_id: {
+                if (exp->count < 2) return false;
+                return ext_id(pen, exp->nodes[1]);
+            }
+            case EXT_eq: case EXT_gt:  case EXT_ge:
+            case EXT_lt: case EXT_le: // TODO are these of any use?
                 return ext_compare(pen, exp, tag);
             default: { // TODO better err reporting...
                 printf("**** Undefined extn: ");
@@ -1395,13 +1423,14 @@ Peg* peg_parser(Peg* peg, char* input, int start, int end, int flags) {
     pen.grammar = peg->src;
     pen.tree = peg->tree;
     pen.input = input;
+    pen.start = start;
     pen.pos = start;
     pen.end = end; //strlen(input);
     pen.depth = 0;
     pen.stack = 0;
     pen.multi = 0;
     pen.flags = flags;
-    pen.trace_pos = 0;
+    pen.trace_pos = start;
     pen.trace_depth = 0;
     pen.trace_open = true;
     pen.fail = 0;
@@ -1412,7 +1441,7 @@ Peg* peg_parser(Peg* peg, char* input, int start, int end, int flags) {
 
     bool result = run(&pen, begin);
 
-    if (pen.flags) printf("\n"); // end of debug trace
+    if (pen.flags) printf("\n\n"); // end of debug trace
 
     if (result) {
         Peg* new_peg = newPeg(input, pen.results[0], peg, NULL);
@@ -1456,6 +1485,7 @@ extern Peg* peg_parse_text(Peg* peg, char* input, int start, int end) {
     return peg_parser(peg, input, start, end, 0);
 }
 
+
 // display the parse tree or error report
 extern void peg_print(Peg* peg) {
     if (peg->err) fault_report(peg);
@@ -1465,16 +1495,6 @@ extern void peg_print(Peg* peg) {
 // true if the `peg` encountered an error
 extern bool peg_err(Peg* peg) {
     return peg->err? true : false;
-}
-
-// print out a trace of the parse...
-extern Peg* peg_trace(Peg* peg, char* input) {
-    return peg_parser(peg, input, 0, strlen(input), 2);
-}
-
-// print out a low level trace of the parser instructions..
-extern Peg* peg_debug(Peg* peg, char* input) {
-    return peg_parser(peg, input, 0, strlen(input), 1);
 }
 
 // Peg* access ..........
@@ -1516,4 +1536,22 @@ extern int peg_count(Node* node) {
 // returns ptr to the ith child node
 extern Node* peg_nodes(Node* node, int i) {
     return node->nodes[i];
+}
+
+// Debug trace.......................
+
+// print out a trace of the parse...
+extern Peg* peg_trace(Peg* peg, char* input) {
+    return peg_parser(peg, input, 0, strlen(input), 2);
+}
+extern Peg* peg_trace_text(Peg* peg, char* input, int start, int end) {
+    return peg_parser(peg, input, start, end, 2);
+}
+
+// print out a low level trace of the parser instructions..
+extern Peg* peg_debug(Peg* peg, char* input) {
+    return peg_parser(peg, input, 0, strlen(input), 1);
+}
+extern Peg* peg_debug_text(Peg* peg, char* input, int start, int end) {
+    return peg_parser(peg, input, start, end, 1);
 }

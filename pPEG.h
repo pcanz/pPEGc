@@ -18,12 +18,6 @@ void peg_print(Peg* peg);
 
 bool peg_err(Peg* peg); // if error ...
 
-// print out a trace of the parse rule matches...
-Peg* peg_trace(Peg* peg, char* input);
-
-// print out a low level trace of the parser instructions..
-Peg* peg_debug(Peg* peg, char* input);
-
 // Peg* access ..........
 
 Node* peg_tree(Peg*); // ptree root Node
@@ -46,3 +40,12 @@ int peg_count(Node*);
 
 // returns ptr to the ith child node
 Node* peg_nodes(Node*, int);
+
+
+// print out a trace of the parse rule matches...
+Peg* peg_trace(Peg* peg, char* input);
+Peg* peg_trace_text(Peg* peg, char* input, int start, int end);
+
+// print out a low level trace of the parser instructions..
+Peg* peg_debug(Peg* peg, char* input);
+Peg* peg_debug_text(Peg* peg, char* input, int start, int end);

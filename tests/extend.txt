@@ -1,21 +1,62 @@
 #   Extensions
 
-use: s = x '-' <id x>  x = 'x'+
+Note:
+* <id x> will match the same input that was matched by the prior x sibling match.
+* anonymous match, no node in the parse tree.
+
+use:
+    s = x '-' <id x>
+    x = 'x'+
+
 match: x-x
 match: xxx-xxx
 not: xxx-xx
+not: xx-xxx
 
-use: s = x '-' <eq x>  x = [xy]+
+use:
+    s = x '-' <id x> 'x'+
+    x = 'x'+
+
+match: xxx-xxxxx
+
+Note:
+* <eq x> will match x and check it matches the same length as the prior x sibling match.
+* anonymous match, the match result node is deleted from the parse tree.
+
+use:
+    s = x '-' <eq x>
+    x = [xy]+
+
 match: x-x
 match: y-x
 match: xyx-yxx
 not: xxx-xx
+not: xxx-xxxx
 
-use: s = x '-' <gt x>  x = [xy]+
+use:
+    s = x '-' <gt x>
+    x = [xy]+
+
 match: x-xy
 match: yxx-xyyx
 match: x-yyyy
 not: xxx-xxx
+
+
+Note:
+* <and x y> matches x and then matches y on the matched text.
+* the y match can not over-run the text matched by x.
+* the y result replaces the x result.
+
+use:
+  P = 'x' <and Q R> 'z'
+  Q = ~'z'*   
+  R = [xyz]*                      
+
+match: xxxyyxz
+
+
+Palindrome: a tough test case!
 
 use:
   P = x <and M P> <id x> / x?   
