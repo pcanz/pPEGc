@@ -402,12 +402,17 @@ void print_ptree(Peg* peg) {
 
 void print_cursor(char* p, int pos) {
     int i = pos;
-    while (i > 0 && p[i] != '\n' && p[i] != '\r') i--;
-    if (i>0) i++; // after line break
+    while (i>0 && p[i]<' ') i--; // back-off eol
+    while (i > 0 && pos-i < 32 && p[i]>=' ') i--;
     int j = pos;
-    while (p[j] != 0 && p[j] != '\n' && p[j] != '\r') j++;
-    for (int k=i; k<j; k++) printf("%c", p[k]);
-    printf("\n");
+    while (p[j] != 0 && p[j]<' ') j++; // advance over eol
+    while (p[j] != 0 && j-pos < 32 && p[j]>=' ') j++;
+    for (int k=i; k<j; k++) { 
+        char c = p[k];
+        if (c < ' ') c = ' ';
+        printf("%c", c);
+    }
+    printf("\n");   
     for (int k=i; k<pos; k++) {
         printf(" ");
         k += utf8_len(p+k)-1;

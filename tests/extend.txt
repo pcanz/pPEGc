@@ -21,7 +21,8 @@ match: xxx-xxxxx
 
 Note:
 * <eq x> will match x and check it matches the same length as the prior x sibling match.
-* anonymous match, the match result node is deleted from the parse tree.
+* <gt x> will match x and check it matches a longer length than the prior x sibling match.
+* result is an anonymous match, the match result node is deleted from the parse tree.
 
 use:
     s = x '-' <eq x>

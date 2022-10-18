@@ -6,6 +6,8 @@ Options:
 >   match: ... # parse and only show errors
 >   not: ...   # parse and report an error if it matches
 >   parse: ... # parse and show parse tree
+>   trace: ... # parse and show rule trace
+>   debug: ... # parse showing parser machine instructions
 
 use: s = 'x'
 match: x
@@ -110,7 +112,9 @@ use: s = 'x' ('\n'/'\r' '\n'?) [ \t]* 'y'
 match: x
 	y
 use: s = 'x' [\u0009-\u005A]* 'y'
-match: x	   ABCy
+match: xABCy
+match: x	XYZy
+not: xabcy
 
 use: s = 'x'*3
 not: xx
@@ -142,10 +146,19 @@ match: «
 use: s = [x«y»]+
 match: y»x«
 
+use:
+    # comment ....
+    date  = year '-' month '-' day
+    year  = [0-9]*4
+    month = [0-9]*2  # comment..
+    day   = [0-9]*2
+    # end comment.....
+
+match: 2022-02-03
 
 use:
-	# comment ....
-    Peg   = _ rule+ _  # comment ..                          
+	# standard pPEG grammar...
+    Peg   = _ rule+ _                         
     rule  = id _ '=' _ alt                       
                                                  
     alt   = seq ('/'_ seq)*                      
@@ -162,18 +175,18 @@ use:
     sfx   = [+?] / '*' range?                    
     range = num (dots num?)?                      
     num   = [0-9]+
-	dots  = '..'  # comment ..                             
-    # comment ..                                             
+	dots  = '..'                           
+                                               
     quote = ['] sq ['] 'i'?                      
     sq    = ~[']*                                
     chars = '[' chs ']'                          
     chs   =  ~']'*                               
     extn  = '<' ~'>'* '>'                        
     _     = ([ \t\n\r]+ / '#' ~[\n\r]*)*
-	# comment..
 
 match:
-    Peg   = _ rule+ _                            
+	# standard pPEG grammar...
+    Peg   = _ rule+ _                         
     rule  = id _ '=' _ alt                       
                                                  
     alt   = seq ('/'_ seq)*                      
@@ -183,21 +196,18 @@ match:
     term  = call / quote / chars / group / extn  
     group = '('_ alt ')'                         
                                                  
-    call  = at? id multi? _ !'='                 
-    at    = '@'                                  
-    multi = '::' id                              
+    call  = id _ !'='                 
     id    = [a-zA-Z_] [a-zA-Z0-9_-]*             
                                                  
     pfx   = [~!&]                                
     sfx   = [+?] / '*' range?                    
     range = num (dots num?)?                      
     num   = [0-9]+
-	dots  = '..'                               
-                                                 
+	dots  = '..'                           
+                                               
     quote = ['] sq ['] 'i'?                      
     sq    = ~[']*                                
     chars = '[' chs ']'                          
     chs   =  ~']'*                               
-    extn  = '<' ~'>'* '>'
-	_     = ([ \t\n\r]+ / '#' ~[\n\r]*)*
-                        
+    extn  = '<' ~'>'* '>'                        
+    _     = ([ \t\n\r]+ / '#' ~[\n\r]*)*
