@@ -2,7 +2,7 @@
 
 This is an implementation of [pPEG] in C.
 
-A single file `pPEG.c`, full features but still under development.
+A single file `pPEG.c`, with no dependencies other than std lib.
 
 ##  Example
 
@@ -23,7 +23,7 @@ A single file `pPEG.c`, full features but still under development.
         "    auth    = ~[/?#]*                        \n"
         "    path    = ~[?#]*                         \n"
         "    query   = ~'#'*                          \n"
-        "    frag    = ~_WS*                          \n";
+        "    frag    = ~[ \t\n\r]*                    \n";
 
         Peg* uri_peg = peg_compile(uri_grammar);
 
@@ -97,9 +97,9 @@ Compile and use:
 
     > cc pPeg.c -o pPEG.o
 
-    > cc file.c -o file.a ../pPEG.o
+    > cc file.c -o file.o ../pPEG.o
 
-    > ./file.a
+    > ./file.o
 
 
 [pPEG]: https://github.com/pcanz/pPEG
