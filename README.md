@@ -4,6 +4,14 @@ This is an implementation of [pPEG] in C.
 
 A single file `pPEG.c`, with no dependencies other than std lib.
 
+## Please Note
+
+This is a proof of concept for a [pPEG] implementation in C.
+
+I do not plan to maintain this code, but it might be a good starting place
+for anyone interested in writing their own PEG grammar-parser.
+
+
 ##  Example
 
 ``` c

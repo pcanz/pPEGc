@@ -891,7 +891,7 @@ bool ext_and_ids(Env *pen, Node *id1, Node *id2) { // id1 -> id2
     bool result = run(pen, id1);
     if (result && pen->stack > stack) {
         if (pen->pos == start) { // empty match
-            for (int i=stack; i<stack; i++) {
+            for (int i=stack; i < pen->stack; i++) {
                 drop(pen->results[i]);
             }
             pen->stack = stack;            
@@ -957,7 +957,7 @@ bool ext_compare(Env* pen, Node* exp, int key) {
     if (!result) return false;
     int size = pen->pos - start;
     if (pen->stack > stack) { // delete nodes...
-        for (int i=stack; i<stack; i++) {
+        for (int i=stack; i < pen->stack; i++) {
             drop(pen->results[i]);
         }
         pen->stack = stack;
@@ -1257,7 +1257,7 @@ bool run(Env *pen, Node *exp) {
                 pen->pos = pos;
             }
             if (pen->stack > stack) {
-                for (int i=stack; i<stack; i++) {
+                for (int i=stack; i < pen->stack; i++) {
                     drop(pen->results[i]);
                 }
                 pen->stack = stack;
@@ -1276,7 +1276,7 @@ bool run(Env *pen, Node *exp) {
         do {
             bool result = run(pen, op);
             if (!result) break;
-            if (pen->pos == pos) break; // no porgress
+            if (pen->pos == pos) break; // no progress
             pos = pen->pos;
             stack = pen->stack;
             count += 1;
@@ -1286,7 +1286,7 @@ bool run(Env *pen, Node *exp) {
             pen->pos = pos; // reset last run failure
         }
         if (pen->stack > stack) {
-            for (int i=stack; i<stack; i++) {
+            for (int i=stack; i < pen->stack; i++) {
                 drop(pen->results[i]);
             }
             pen->stack = stack;
@@ -1302,7 +1302,7 @@ bool run(Env *pen, Node *exp) {
         bool result = run(pen, op);
         pen->pos = pos; // reset
         if (pen->stack > stack) {
-            for (int i=stack; i<stack; i++) {
+            for (int i=stack; i < pen->stack; i++) {
                 drop(pen->results[i]);
             }
             pen->stack = stack;
